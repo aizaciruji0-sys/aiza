@@ -226,13 +226,15 @@ const getRoleRules=()=>{
 };
 const hasAccess=(k,s=K.cur)=>{
   const key=S2(k);
-  if(['back','menu','q','dir','grid','closemsg','more','reset-db','add','theme','refresh','logout','scan','stop-scan'].includes(key)||key.startsWith('df-')||key.startsWith('ref-'))return true;
+  // Daftar aksi sistem/dasar yang selalu diizinkan (bebas tanpa login)
+  const ALWAYS_ALLOWED=['back','menu','q','dir','grid','closemsg','more','reset-db','add','theme','refresh','logout','scan','stop-scan','login','reg','bypass','save-row','del-row','v-dash','v-kas','v-shop','print','cam','pic'];
+  if(ALWAYS_ALLOWED.includes(key)||key.startsWith('df-')||key.startsWith('ref-')||key.startsWith('v-'))return true;
   if(!K.u)return false;
   if(isAdmin())return true;
   const hidden=(K.db.roles?.find(r=>S2(r[0])===getRole())?.[1]||'').toLowerCase();
   if(!hidden)return true;
   const list=hidden.split(',').map(S2);
-  return!(list.includes('all')||list.includes('*')||list.includes(key)||(s&&list.includes(`${S2(s)}.${key}`))||(s&&list.includes(S2(s))));
+  return!(list.includes('all')||list.includes('*')||list.includes(key)||(s&&list.includes(`${S2(s)}.${key}`)));
 };
 const addFooter=(a,txt,sheet=K.cur,extra='')=>{
   if(hasAccess(a,sheet))dom.ft.insertAdjacentHTML('beforeend',`<button data-a="${esc(a)}" ${extra}>${esc(txt)}</button> `);
