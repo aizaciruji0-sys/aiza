@@ -1,19 +1,18 @@
 'use strict';
 /* ============================================================
-   APEX ULTRA KISS ABSOLUTE — MONOFLOW, ZERO-BLOAT, ANTI-BUG
+   APEX ULTRA KISS ABSOLUTE — MONOFLOW D1 PRIMARY, SHEET BACKUP
    ============================================================ */
 const W=window,L=localStorage,$=id=>document.getElementById(id);
-let db=null,syncing=false,syncDebounce=null,scanStream=null,scanTimer=null;
+let db=null,syncing=false,scanStream=null,scanTimer=null;
 
 const bc=typeof BroadcastChannel!=='undefined'?new BroadcastChannel('sync'):{postMessage(){},onmessage:null};
-// Render dari sync: jangan hapus isian yang sedang diketik (login/form/edit)
 const softRender=()=>{if(K.u&&K.idx===null&&!['toko','schema','bulksheet','edit'].includes(K.v))render();};
 bc.onmessage=e=>{
   if(e.data==='synced')idbGet('apex_matrix').then(m=>{if(m&&typeof m==='object')Object.assign(K.db,m);softRender();});
   else if(e.data==='kick'&&!syncing)syn();
 };
 
-/* ---------------- IndexedDB: store 'kv' (matrix) & 'mut' (antrean mutasi) ---------------- */
+/* ---------------- IndexedDB: matrix 'kv' & antrean 'mut' ---------------- */
 function initDB(cb){
   try{
     const rq=indexedDB.open('apex_db',1);
@@ -44,105 +43,72 @@ function idbDelKeys(keys,st='mut'){
   try{const s=idbStore(st,'readwrite');keys.forEach(k=>s.delete(k));}catch{}
 }
 
-/* ---------------- Antrean mutasi (kunci terurut = FIFO: waktu + urutan + acak antar-tab) ---------------- */
-let seq=0,saves=0;
+/* ---------------- Antrean Mutasi FIFO ---------------- */
+let seq=0;
 function save(row,targetTable=K.cur,actionType=2){
-  saves++;
   idbPut({
-    i:Date.now().toString(36)+(seq=(seq+1)%46656).toString(36).padStart(3,'0')+Math.random().toString(36).slice(2,4),
+    i:Date.now().toString(36)+(seq=(seq+1)%46656).toString(36).padStart(3,'0'),
     tn:targetTable,
     y:actionType,
-    r:Array.isArray(row)?row:Object.values(row),
-    ts:Date.now()
+    r:Array.isArray(row)?row:Object.values(row)
   },null,'mut');
   bc.postMessage('kick');
-  clearTimeout(syncDebounce);syncDebounce=setTimeout(()=>syn(false),50);
+  setTimeout(()=>syn(),50);
 }
 
-/* ---------------- Transport: D1 -> Apps Script ---------------- */
-const isOk=r=>Boolean(r?.ok||r?.s==='ok'||r?.status==='ok');
-const SYNC_ACTIONS=['pull_batch','manifest','push'];
-const sig=()=>AbortSignal.timeout?.(30000);
-
+/* ---------------- Transport: Langsung ke D1 Worker ---------------- */
 async function req(p={}){
   p.u=p.u||L.u||K.u||'admin';
-  if(HARD.d1Url&&SYNC_ACTIONS.includes(p.a)){
-    try{
-      const res=await fetch(HARD.d1Url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p),signal:sig()});
-      if(res.ok){const r=await res.json();if(isOk(r))return r;}
-    }catch{}
-  }
-  return new Promise(res=>{
-    const done=j=>res({ok:j?.ok??j?.s==='ok',...j});
-    if(W.google?.script?.run){
-      W.google.script.run.withSuccessHandler(done).withFailureHandler(e=>res({ok:false,e})).core(p);
-      return;
-    }
-    if(HARD.gasUrl&&/^https?:\/\//i.test(HARD.gasUrl)){
-      fetch(HARD.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(p),redirect:'follow',signal:sig()})
-        .then(r=>r.json()).then(done).catch(e=>res({ok:false,e}));
-      return;
-    }
-    res({ok:false,e:'offline'});
-  });
+  p.gasUrl=HARD.gasUrl;
+  if(!HARD.d1Url)return{ok:false,e:'offline'};
+  try{
+    const res=await fetch(HARD.d1Url,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(p),
+      signal:AbortSignal.timeout?.(15000)
+    });
+    return res.ok?await res.json():{ok:false};
+  }catch(e){return{ok:false,e};}
 }
 
-/* ---------------- Sync: push mutasi -> manifest -> pull yang berubah ---------------- */
-let again=0;
+/* ---------------- Sinkronisasi Ultra Singkat ---------------- */
 async function syn(force=false){
-  if(!navigator.onLine||!db)return false;
-  if(syncing){again=Math.max(again,force?2:1);return false;}
-  syncing=true;msg('sedang sync...');
+  if(!navigator.onLine||!db||syncing)return false;
+  syncing=true;msg('sync...');
   let ok=false;
   try{
-    const tables=[...K.shs],mark=saves;
-    if(force)L.vs='[]';
-    const ver=JSON.parse(L.vs||'[]');
+    const tables=[...K.shs];
+    const ver=force?[]:JSON.parse(L.vs||'[]');
+    const queued=await idbGetAll('mut');
 
-    // 1. MANIFEST: pastikan tabel ada di server + ambil versi
-    const r0=await req({a:'manifest',tn:tables,cols:K.cols});
-    let m=r0?.data||r0;
-    if(!m?.v)throw new Error('manifest');
-    if(Array.isArray(m.shs))m.shs.forEach(s=>{if(!K.shs.includes(s))K.shs.push(s);});
-    if(m.cols&&typeof m.cols==='object')Object.assign(K.cols,m.cols);
-    if(m.vis&&typeof m.vis==='object')Object.assign(K.vis,m.vis);
-
-    // 2. PUSH: antrean mutasi (FIFO) + isi awal tabel yang masih kosong di server
-    const queued=await idbGetAll('mut'),seed=[];
-    tables.forEach((t,i)=>{if(m.v[i]==='0_0')(K.db[t]||[]).forEach(row=>seed.push({tn:t,y:2,r:row}));});
-    if(queued.length||seed.length){
-      const pr=await req({a:'push',m:[...seed,...queued],tn:tables,cols:K.cols,gasUrl:HARD.gasUrl});
-      if(!pr?.ok)throw new Error('push');
-      idbDelKeys(queued.map(x=>x.i),'mut');
-      m=pr.manifest||m;
+    // 1. Push antrean lokal ke D1 (jika ada)
+    if(queued.length){
+      const pr=await req({a:'push',m:queued,tn:tables,cols:K.cols});
+      if(pr?.ok)idbDelKeys(queued.map(x=>x.i),'mut');
     }
 
-    // 3. PULL: hanya tabel yang versinya berbeda (server = acuan)
-    const toPull=[];
-    tables.forEach((_,i)=>{if(force||(m.v[i]&&m.v[i]!==ver[i]))toPull.push({t:i});});
-    if(toPull.length){
-      const b=await req({a:'pull_batch',reqs:toPull,tn:tables,cols:K.cols});
-      // Ada perubahan lokal baru selama sync -> buang hasil pull (akan menimpanya), ulangi sync
-      if(saves!==mark||(await idbGetAll('mut')).length)again=Math.max(again,1);
-      else{
+    // 2. Ambil manifest versi dari D1
+    const mf=await req({a:'manifest',tn:tables,cols:K.cols});
+    const sVer=mf?.v||mf?.data?.v;
+    if(Array.isArray(sVer)){
+      const toPull=[];
+      tables.forEach((_,i)=>{if(force||sVer[i]!==ver[i])toPull.push({t:i});});
+      if(toPull.length){
+        const b=await req({a:'pull_batch',reqs:toPull,tn:tables,cols:K.cols});
         (b?.data?.results||b?.results||[]).forEach(x=>{
-          const name=K.shs[x?.t];
-          if(!x?.v||!name)return;
+          const name=tables[x.t];
+          if(!name)return;
           ver[x.t]=x.v;K.db[name]=x.r||[];
           if(Array.isArray(x.cols)&&x.cols.length)K.cols[name]=x.cols;
         });
-        L.vs=JSON.stringify(ver);persist();bc.postMessage('synced');softRender();
+        L.vs=JSON.stringify(ver);
+        persist();bc.postMessage('synced');softRender();
       }
+      ok=true;
     }
-    ok=true;
-  }catch{
-    ok=false;
-  }finally{
-    syncing=false;
-    const a=again;again=0;
-    if(a)setTimeout(()=>syn(a===2),0);
-  }
-  msg(ok?'':'offline');
+  }catch{ok=false;}
+  finally{syncing=false;msg(ok?'':'offline');}
   return ok;
 }
 
@@ -162,7 +128,6 @@ const K={
   refTargetInp:null,savedFormState:null,pwaEvent:null,writing:false
 };
 
-// Tabel toko: ['id','name','sub','phone','bank','footer']
 if(!K.shs.includes('toko'))K.shs.push('toko');
 if(!K.cols.toko)K.cols.toko=['id','name','sub','phone','bank','footer'];
 if(!K.vis.toko)K.vis.toko=['id','name','phone'];
@@ -214,20 +179,18 @@ const fmtNum=n=>N(n).toLocaleString('id-ID');
 const today=()=>new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);
 const msg=t=>{dom.msg.innerHTML='';dom.msg.hidden=!t;if(t)dom.msg.textContent=t;};
 
-/* Tema light / dark */
 const getTheme=()=>L.theme||(W.matchMedia?.('(prefers-color-scheme: dark)').matches?'dark':'light');
 const applyTheme=t=>{
   document.documentElement.dataset.theme=t;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content',t==='dark'?'#000':'#fff');
 };
 
-/* Selector form */
 const fld=c=>dom.fb.querySelector(`[data-col="${CSS.escape(c)}"]`);
 const flds=()=>[...dom.fb.querySelectorAll('[data-col]')];
 const fldBy=re=>flds().find(i=>re.test(i.dataset.col));
 const formState=()=>Object.fromEntries(flds().map(i=>[i.dataset.col,i.value]));
 
-/* ---------------- Navigasi & hak akses ---------------- */
+/* ---------------- Navigasi & Hak Akses ---------------- */
 const setView=(v,idx=null)=>{
   if(dom.q&&dom.q.value.trim()!==''){dom.q.value='';K.page=1;}
   if(K.v!==v||K.idx!==idx){
@@ -286,7 +249,7 @@ const syncStockDelta=(sh,o,n)=>{
   });
 };
 
-/* ---------------- Barcode scanner ---------------- */
+/* ---------------- Scanner ---------------- */
 const stopScan=()=>{
   if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
   if(scanStream){scanStream.getTracks().forEach(t=>t.stop());scanStream=null;}
@@ -307,7 +270,7 @@ const startScan=()=>{
   }).catch(()=>msg('kamera tidak aktif'));
 };
 
-/* ---------------- Perhitungan transaksi ---------------- */
+/* ---------------- Kalkulasi Transaksi ---------------- */
 const calcItems=(t,id)=>{
   const ch=childOf(t);
   if(!ch)return{raw:0,disc:0,cogs:0,pot:0,items:[]};
@@ -397,7 +360,6 @@ const hasDraftItems=t=>{
   return Boolean(ch&&op&&K.db[ch]?.some(r=>S2(cV(r,ch,fkCol(ch)))===S2(op.id)));
 };
 
-/* Hapus baris yang cocok: sinkron stok + antre mutasi hapus */
 const dropRows=(sh,pred)=>{
   const keep=[];
   (K.db[sh]||[]).forEach(r=>{if(pred(r)){syncStockDelta(sh,r,null);save(r,sh,0);}else keep.push(r);});
@@ -409,7 +371,7 @@ const dropTrxDeps=(t,id)=>{
   if(t==='penjualan')dropRows('cicil',c=>S2(cV(c,'cicil','idjual'))===S2(id));
 };
 
-/* ---------------- Produk -> form transaksi ---------------- */
+/* ---------------- Produk -> Form ---------------- */
 const prefillProd=p=>({idproduk:p[0],namaproduk:p[3],hargabeli:p[4],hargajual:p[5],qty:'1',diskon:'',catatan:''});
 const openProdForm=p=>{
   const isB=K.parent?.type==='pembelian',pType=isB?'pembelian':'penjualan';
@@ -506,7 +468,6 @@ const renderDash=()=>{
     (!K.df.kat||S2(kt).includes(S2(K.df.kat)))&&
     (!qW.length||qW.every(w=>`${u} ${d} ${kt}`.toLowerCase().includes(w)));
 
-  // Kas
   let mAll=0,kAll=0,mFil=0,kFil=0;
   (K.db.kas||[]).forEach(r=>{
     if(!isUserVisible(r,'kas'))return;
@@ -515,7 +476,6 @@ const renderDash=()=>{
     if(passFlt(cV(r,'kas','user'),cV(r,'kas','date'),`${cV(r,'kas','kategori')} ${cV(r,'kas','uraian')}`)){mFil+=m;kFil+=k;}
   });
 
-  // Cicilan
   const cMap={},cFilMap={};
   (K.db.cicil||[]).forEach(c=>{
     if(!isUserVisible(c,'cicil'))return;
@@ -524,7 +484,6 @@ const renderDash=()=>{
     if(passFlt(cV(c,'cicil','user'),cV(c,'cicil','date'),''))cFilMap[id]=(cFilMap[id]||0)+jml;
   });
 
-  // Penjualan
   let jAll=0,profFil=0,jFil=0,pAll=0,pFil=0;
   (K.db.penjualan||[]).forEach(r=>{
     if(!isUserVisible(r,'penjualan'))return;
@@ -542,7 +501,6 @@ const renderDash=()=>{
     }
   });
 
-  // Ecer
   let ecQtyFil=0;
   (K.db.ecer||[]).forEach(r=>{
     if(!isUserVisible(r,'ecer'))return;
@@ -553,14 +511,12 @@ const renderDash=()=>{
     }
   });
 
-  // Pembelian
   let bFil=0;
   (K.db.pembelian||[]).forEach(r=>{
     if(!isUserVisible(r,'pembelian'))return;
     if(passFlt(cV(r,'pembelian','user'),cV(r,'pembelian','date'),`${cV(r,'pembelian','idkontak')} ${cV(r,'pembelian','catatan')}`))bFil+=trxNet('pembelian',r);
   });
 
-  // Stok
   let sStok=0,rCount=0,eMod=0,eJual=0;
   (K.db.produk||[]).forEach(r=>{
     const s=N(cV(r,'produk','stok'));
@@ -1022,309 +978,3 @@ const actions={
     const trg=K.db[pType]?.find(x=>S2(x[0])===S2(op.id));
     if(trg&&cI(pType,'idkontak')!==-1){trg[cI(pType,'idkontak')]=kId;save(trg,pType,1);}
     persist();syncTrx(pType);
-    K.cur=pType;setView('form',(K.db[pType]||[]).indexOf(trg));render();
-  },
-  'pay-pas':()=>{
-    const r=(K.idx!==null&&K.idx>=0)?K.db[K.cur][K.idx]:null,
-          pid=r?r[0]:(fld(cols()[0])?.value||''),bayar=fld('bayar');
-    if(bayar&&pid){
-      const dVal=N(fld('diskon')?.value||(r?cV(r,K.cur,'diskon'):0)),{raw,disc}=calcItems(K.cur,pid);
-      bayar.value=String(Math.max(0,raw-disc-dVal));
-    }
-  },
-  revisi:()=>{
-    if(!(K.idx>=0))return;
-    const r=K.db[K.cur][K.idx],pid=r?.[0];
-    if(!pid)return;
-    K.parent={type:K.cur,id:pid,open:true};
-    const sI=cI(K.cur,'status');
-    if(sI!==-1){r[sI]='revisi';save(r,K.cur,1);persist();}
-    K.cur=childOf(K.cur);setView('list',null);render();
-  },
-  cicil:()=>{
-    if(!(K.idx>=0))return;
-    const r=K.db[K.cur][K.idx],pid=r?.[0];
-    if(!pid)return;
-    if(!K.shs.includes('cicil'))K.shs.push('cicil');
-    const remDebt=Math.max(0,trxNet('penjualan',r)-paidOf('penjualan',r));
-    K.cur='cicil';
-    K.prefill={idjual:pid,idkontak:cV(r,'penjualan','idkontak'),date:today(),user:K.u||'admin',jumlah:remDebt>0?String(remDebt):''};
-    setView('form',-1);render();
-  },
-  'trx-rincian':()=>{
-    if(!(K.idx>=0))return;
-    const pid=K.db[K.cur][K.idx]?.[0];
-    if(pid){K.parent={type:K.cur,id:pid,open:true};K.cur=childOf(K.cur);setView('list',null);render();}
-  },
-  'show-nota':()=>{
-    const pid=(K.cur==='penjualan'&&K.idx>=0)?K.db.penjualan[K.idx]?.[0]:(K.parent?.type==='penjualan'?K.parent.id:K.db.penjualan?.[0]?.[0]);
-    if(!pid)return;
-    K.receiptRaw=formatNota(pid);setView('nota',null);render();
-  },
-  rawbt:()=>{
-    if(!K.receiptRaw)return;
-    const u=encodeURIComponent(K.receiptRaw.trim()+'\r\n\r\n\r\n');
-    W.location.href=/Android/i.test(navigator.userAgent)?`intent:${u}#Intent;scheme=rawbt;package=ru.a402d.rawbtprinter;end;`:`rawbt:${u}`;
-  },
-  jpg:()=>{
-    if(!K.receiptRaw)return;
-    const lines=K.receiptRaw.split(/\r?\n/),lh=18,font='13px monospace',
-          mctx=document.createElement('canvas').getContext('2d');
-    mctx.font=font;
-    const w=Math.ceil(Math.max(0,...lines.map(l=>mctx.measureText(l).width)))||280,h=lines.length*lh+4,
-          can=document.createElement('canvas');
-    can.width=w;can.height=h;
-    const ctx=can.getContext('2d');
-    ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.fillStyle='#000';ctx.font=font;ctx.textBaseline='top';
-    lines.forEach((l,i)=>ctx.fillText(l,0,i*lh+2));
-    can.toBlob(blob=>{
-      if(!blob)return;
-      const dlPng=()=>{
-        const u=URL.createObjectURL(blob),a=document.createElement('a');
-        a.href=u;a.download=`nota_${Date.now()}.png`;document.body.appendChild(a);a.click();
-        setTimeout(()=>{a.remove();URL.revokeObjectURL(u);},500);
-      };
-      try{
-        if(navigator.clipboard&&W.ClipboardItem)navigator.clipboard.write([new ClipboardItem({'image/png':blob})]).catch(dlPng);
-        else dlPng();
-      }catch{dlPng();}
-    },'image/png');
-  },
-  print:()=>W.print(),
-
-  'save-store':()=>{
-    const c=K.cols.toko,row=(K.db.toko?.[0]||[]).slice(0,c.length);
-    while(row.length<c.length)row.push('');
-    row[0]='store_1';
-    dom.fb.querySelectorAll('[data-cfg]').forEach(i=>{const ci=c.indexOf(i.dataset.cfg);if(ci>-1)row[ci]=i.value.trim();});
-    K.db.toko=[row];
-    save(row,'toko',1);persist();syn(true);setView('list',null);render();
-  },
-  'reset-db':async()=>{
-    if(K.conf!=='reset-db'){K.conf='reset-db';return msg('reset? klik lagi');}
-    K.conf=null;
-    if('caches' in W){try{await Promise.all((await caches.keys()).map(k=>caches.delete(k)));}catch{}}
-    idbClearStore('kv');idbClearStore('mut');
-    K.shs.forEach(s=>{K.db[s]=[];});
-    L.vs='[]';persist();render();
-    await syn(true);render();
-  },
-  'pwa-install':()=>{
-    if(!K.pwaEvent)return;
-    K.pwaEvent.prompt();
-    K.pwaEvent.userChoice.then(()=>{K.pwaEvent=null;render();});
-  },
-  'save-schema':()=>{
-    const list=k=>(dom.fb.querySelector(`[data-f="${k}"]`)?.value||'').split(',').map(S2).filter(Boolean),
-          nc=list('cols');
-    if(nc.length){
-      const v=list('vis').filter(x=>nc.includes(x)),f=list('form').filter(x=>nc.includes(x));
-      K.cols[K.cur]=nc;
-      K.vis[K.cur]=v.length?v:nc.slice(0,2);
-      K.fvis[K.cur]=f.length?f:nc.slice();
-      (K.db[K.cur]||[]).forEach(r=>{if(r.length>nc.length)r.length=nc.length;while(r.length<nc.length)r.push('');});
-      persist();syn(true);
-    }
-    setView('list',null);render();
-  },
-  'save-bulk':()=>{
-    const n=cols().length;
-    dom.ls.querySelectorAll('[data-idx]').forEach(div=>{
-      const idx=parseInt(div.dataset.idx,10);
-      if(isNaN(idx)||!K.db[K.cur][idx])return;
-      const p=div.textContent.split('|').map(s=>s.trim());
-      while(p.length<n)p.push('');
-      const row=p.slice(0,n);
-      K.db[K.cur][idx]=row;save(row,K.cur,1);
-    });
-    persist();syn(true);setView('list',null);render();
-  },
-
-  grid:()=>{K.grid=!K.grid;render();},
-  dir:()=>{K.dir=-K.dir;K.page=1;render();},
-  more:()=>{K.page++;render();},
-  logout:()=>{K.u=L.u='';K.hist=[];K.readyOnly=false;persist();render();},
-  cam:()=>dom.fCam.click(),
-  pic:()=>dom.fImg.click(),
-  'doc-upload':()=>dom.fDoc.click(),
-  gimg:()=>{
-    const q=fld('namaproduk')?.value||fld('nama')?.value||dom.q.value||'';
-    if(q)W.open('https://www.google.com/search?tbm=isch&q='+encodeURIComponent(q),'_blank','noopener,noreferrer');
-  },
-  navigasi:()=>{
-    const loc=(fldBy(GEO_RE)?.value||'').trim();
-    if(!loc)return;
-    if(/Android|iPhone|iPad/i.test(navigator.userAgent))W.location.href=`geo:${loc}?q=${encodeURIComponent(loc)}`;
-    else W.open(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(loc)}`,'_blank','noopener,noreferrer');
-  },
-  gps:()=>{
-    const trg=fldBy(GEO_RE);
-    if(!trg||!navigator.geolocation)return;
-    navigator.geolocation.getCurrentPosition(
-      p=>{trg.value=`${p.coords.latitude.toFixed(6)},${p.coords.longitude.toFixed(6)}`;},
-      ()=>msg('gps err'),{enableHighAccuracy:true,timeout:5000});
-  },
-  'sh-sel':el=>{K.cur=el.value;K.parent=K.prefill=K.prodIdx=K.savedFormState=null;setView('list',null);K.page=1;K.readyOnly=false;render();},
-  'st-sel':el=>{K.sort=parseInt(el.value,10)||0;K.page=1;render();},
-  'act-sel':el=>{
-    const a=el.value;el.value='';
-    if(!a)return;
-    if(a==='edit'){setView(K.v==='edit'?'list':'edit',null);render();}
-    else if(a==='bulksheet'||a==='schema'){setView(a,null);render();}
-    else if(a==='tsv'){
-      dl([cols().join('\t'),...(K.db[K.cur]||[]).map(r=>r.join('\t'))].join('\n'),`${K.cur}_${today()}.tsv`,'text/tab-separated-values;charset=utf-8');
-    }
-    else if(a==='imp')dom.fImp.click();
-    else if(a==='clear'){
-      if(K.conf!=='clear'){K.conf='clear';msg(`clear ${K.cur}?`);return;}
-      (K.db[K.cur]||[]).forEach(r=>save(r,K.cur,0));
-      K.db[K.cur]=[];K.conf=null;persist();syn(true);render();
-    }
-  },
-  'preset-kasir':()=>applyPreset('kasir'),
-  'preset-gudang':()=>applyPreset('gudang')
-};
-
-function applyPreset(name){
-  const h=fld('hide'),v=fld('validasi');
-  if(h)h.value=PRESETS[name].hide;
-  if(v)v.value=PRESETS[name].validasi;
-}
-
-/* ---------------- Event global ---------------- */
-document.addEventListener('click',e=>{
-  const b=e.target.closest('[data-a]');
-  if(b){
-    if(b.tagName==='SELECT')return;
-    const a=b.dataset.a;
-    if(a.startsWith('ref-')){
-      const cName=b.dataset.refCol||'',val=cName?(fld(cName)?.value||''):'';
-      K.savedFormState=formState();K.refTargetInp=cName;K.cur=a.slice(4);
-      dom.q.value=val.trim();K.page=1;setView('list',null);
-      return render();
-    }
-    if(!['del-row','clear-items','act-sel','reset-db'].includes(a)&&K.conf){K.conf=null;msg();}
-    return actions[a]?.(b,e);
-  }
-
-  const r=e.target.closest('#list>[data-idx]');
-  if(r&&K.v==='list'&&K.idx===null){
-    const idx=parseInt(r.dataset.idx,10);
-    if(K.refTargetInp&&K.hist.length){
-      const prev=K.hist.pop(),selId=K.db[K.cur]?.[idx]?.[0]||'';
-      K.cur=prev.cur;K.v=prev.v;K.idx=prev.idx;K.parent=prev.parent;K.readyOnly=Boolean(prev.readyOnly);
-      if(prev.savedFormState)K.savedFormState=prev.savedFormState;
-      K.savedFormState=K.savedFormState||{};
-      K.savedFormState[K.refTargetInp]=selId;K.refTargetInp=null;
-      return render();
-    }
-    if(K.cur==='cms'){setView('cms_detail',idx);return render();}
-    if(K.cur==='produk')return openProdForm(K.db.produk[idx]||[]);
-    if(isTrx()&&K.db[K.cur]?.[idx]?.[0])K.parent={type:K.cur,id:K.db[K.cur][idx][0]};
-    setView('form',idx);render();
-  }
-});
-
-document.addEventListener('input',e=>{
-  const t=e.target;
-  if(t.id==='q'){
-    if(K.v==='menu'){
-      const qm=S2(t.value);
-      dom.ft.querySelectorAll('button[data-a]').forEach(btn=>{btn.hidden=qm&&!btn.textContent.toLowerCase().includes(qm);});
-    }else{K.page=1;render();}
-    return;
-  }
-  if(t.dataset.df){
-    const k=t.dataset.df,pos=t.selectionStart;
-    K.df[k]=t.value;persist();render();
-    const next=dom.db.querySelector(`[data-df="${CSS.escape(k)}"]`);
-    if(next){next.focus();if(typeof pos==='number')try{next.setSelectionRange(pos,pos);}catch{}}
-    return;
-  }
-  if(t.dataset.col){
-    const col=t.dataset.col,val=(t.value||'').trim(),trg=resolveRef(col);
-    updateFormThumb(t);
-    if(trg){
-      const btn=dom.ft.querySelector(`[data-a="ref-${CSS.escape(trg)}"]`);
-      if(val===''&&btn)btn.remove();
-      else if(val!==''&&!btn&&K.shs.includes(trg)&&(K.db[trg]||[]).length>0)addFooter(`ref-${trg}`,`ref ${trg}`,K.cur,`data-ref-col="${esc(col)}"`);
-    }
-    if(['idproduk','namaproduk'].includes(col)&&K.cur!=='produk'){
-      const q=S2(val),f=q&&K.db.produk?.find(p=>S2(cV(p,'produk','idproduk')||p[0])===q||S2(cV(p,'produk','namaproduk'))===q);
-      if(f)flds().forEach(inp=>{const fi=cI('produk',inp.dataset.col);if(fi!==-1)inp.value=f[fi]||'';});
-    }
-  }
-});
-
-const readFile=(file,mode,cb)=>{const rd=new FileReader();rd.onload=ev=>cb(ev.target.result||'');rd[mode](file);};
-
-function importText(text){
-  const lines=text.split(/\r?\n/).filter(Boolean);
-  if(!lines.length)return;
-  const sep=lines[0].includes('\t')?'\t':(lines[0].includes(';')?';':','),c=cols(),
-        start=lines[0].split(sep).map(s=>s.trim().toLowerCase()).every(h=>c.includes(h))?1:0;
-  for(let i=start;i<lines.length;i++){
-    const parts=lines[i].split(sep).map(s=>s.trim()),row=new Array(c.length).fill('');
-    for(let j=0;j<Math.min(parts.length,c.length);j++)row[j]=parts[j];
-    if(!row[0])row[0]=genId();
-    (K.db[K.cur]=K.db[K.cur]||[]).push(row);save(row,K.cur,2);
-  }
-  persist();syn(true);render();
-}
-
-document.addEventListener('change',e=>{
-  const t=e.target;
-  if(t.dataset.a&&actions[t.dataset.a])actions[t.dataset.a](t);
-  const file=t.files?.[0];
-  if(!file)return;
-
-  if(t===dom.fCam||t===dom.fImg||t===dom.fDoc){
-    const isDoc=t===dom.fDoc,trgCol=isDoc?'file':'foto',
-          tInp=fld(trgCol)||fldBy(new RegExp(trgCol,'i')),jInp=isDoc?fldBy(/judul|nama/i):null;
-    if(jInp&&!jInp.value)jInp.value=file.name;
-    readFile(file,'readAsDataURL',data=>{if(tInp){tInp.value=data;updateFormThumb(tInp);}});
-    t.value='';
-  }else if(t===dom.fImp){
-    readFile(file,'readAsText',importText);
-    t.value='';
-  }
-});
-
-document.addEventListener('keydown',e=>{
-  if(e.key==='Enter'&&e.target.tagName!=='TEXTAREA'&&dom.fb.contains(e.target)){
-    e.preventDefault();
-    if(K.writing)return;
-    if(!K.u)actions.login();
-    else if(['bulksheet','toko','schema'].includes(K.v))actions[`save-${K.v}`]();
-    else actions['save-row']();
-  }else if(e.key==='Escape'){
-    if(!dom.scanBox.hidden)stopScan();else actions.back();
-  }
-});
-
-W.addEventListener('beforeinstallprompt',e=>{e.preventDefault();K.pwaEvent=e;if(K.v==='menu'||K.v==='dash')render();});
-if('serviceWorker' in navigator&&(W.location.protocol.startsWith('http')||W.location.hostname==='localhost'))
-  W.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').catch(()=>{});});
-W.addEventListener('online',()=>syn(true));
-
-/* ---------------- Boot ---------------- */
-(()=>{
-  if(L.theme)applyTheme(L.theme);
-  try{
-    const d=JSON.parse(L.getItem('apex')||'null');
-    if(d&&typeof d==='object'){
-      ['shs','cols','vis','fvis'].forEach(k=>{if(d[k])K[k]=d[k];});
-      if(d.parent&&typeof d.parent==='object')K.parent=d.parent;
-      if(d.cur&&K.shs.includes(d.cur))K.cur=d.cur;
-      if(d.u)K.u=L.u=d.u;
-      if(d.df&&typeof d.df==='object')K.df=Object.assign(K.df,d.df);
-      K.grid=Boolean(d.grid);
-    }
-  }catch{}
-  initDB(async()=>{
-    const matrix=await idbGet('apex_matrix');
-    if(matrix&&typeof matrix==='object')Object.assign(K.db,matrix);
-    render();
-    syn(true);
-  });
-})();
