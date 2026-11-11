@@ -1,6 +1,6 @@
 'use strict';
 /* ============================================================
-   APEX ULTRA KISS — STREAMLINED, MONOFLOW, ZERO-OVERCOMPLICATION
+   APEX ULTRA KISS — ZERO COMPLICATION, DIRECT & STABLE
    ============================================================ */
 const W=window,L=localStorage,$=id=>document.getElementById(id);
 let db=null,syncing=false,scanStream=null,scanTimer=null;
@@ -42,11 +42,11 @@ function idbDelKeys(keys,st='mut'){
   try{const s=idbStore(st,'readwrite');keys.forEach(k=>s.delete(k));}catch{}
 }
 
-/* ---------------- Mutasi & Sync ---------------- */
+/* ---------------- Mutasi & Sinkronisasi Sederhana ---------------- */
 let seq=0;
 function save(row,targetTable=K.cur,actionType=2){
   idbPut({
-    i:`${Date.now()}_${++seq}_${Math.random().toString(36).slice(2,6)}`,
+    i:`${Date.now()}_${++seq}_${Math.random().toString(36).slice(2,5)}`,
     tn:targetTable,
     y:actionType,
     r:Array.isArray(row)?row:Object.values(row)
@@ -84,22 +84,22 @@ async function syn(force=false){
     if(force)L.vs='[]';
     const ver=JSON.parse(L.vs||'[]');
 
-    // 1. Flush antrean mutasi (Push)
+    // 1. Push mutasi lokal
     const queued=await idbGetAll('mut');
     if(queued.length){
       const pr=await req({a:'push',m:queued,tn:tables,cols:K.cols,gasUrl:HARD.gasUrl});
       if(pr?.ok)idbDelKeys(queued.map(x=>x.i),'mut');
     }
 
-    // 2. Manifest check
+    // 2. Manifest
     const r0=await req({a:'manifest',tn:tables,cols:K.cols});
     const m=r0?.data||r0;
-    if(!m?.v)throw new Error('manifest gagal');
+    if(!m?.v)throw new Error('manifest');
 
     if(m.cols)Object.assign(K.cols,m.cols);
     if(m.vis)Object.assign(K.vis,m.vis);
 
-    // 3. Tarik tabel yang berubah saja
+    // 3. Pull tabel
     const toPull=[];
     tables.forEach((_,i)=>{if(force||m.v[i]!==ver[i])toPull.push({t:i});});
 
@@ -127,9 +127,9 @@ async function syn(force=false){
   return ok;
 }
 
-/* ---------------- State & SSOT ---------------- */
+/* ---------------- State ---------------- */
 const K={
-  u:L.u||'',cur:'penjualan',v:'dash',hist:[],idx:null,page:1,sort:0,dir:1,grid:false,
+  u:L.u||'',cur:'penjualan',v:'dash',idx:null,page:1,sort:0,dir:1,grid:false,
   conf:null,prefill:null,parent:null,receiptRaw:'',readyOnly:false,
   df:{u:'',from:'',to:'',kat:''},
   shs:[...HARD.shs],cols:JSON.parse(JSON.stringify(HARD.cols)),vis:JSON.parse(JSON.stringify(HARD.vis)),
@@ -171,7 +171,7 @@ const cV=(r,s,k)=>{const i=cI(s,k);return(r&&i>-1&&r[i]!==undefined)?String(r[i]
 const vis=(s=K.cur)=>(K.vis[s]||cols(s)).filter(c=>cols(s).includes(c));
 const fvis=(s=K.cur)=>((K.fvis?.[s]?.length)?K.fvis[s]:cols(s)).filter(c=>cols(s).includes(c));
 
-// Pemetaan relasi langsung tanpa algoritma parsing
+// Pemetaan relasi statis
 const PARENT_MAP={produk_jual:'penjualan',produk_beli:'pembelian',cicil:'penjualan'};
 const CHILD_MAP={penjualan:'produk_jual',pembelian:'produk_beli'};
 const FK_MAP={produk_jual:'idpenjualan',produk_beli:'idpembelian',cicil:'idjual'};
@@ -191,53 +191,21 @@ const applyTheme=t=>{
 const fld=c=>dom.fb.querySelector(`[data-col="${CSS.escape(c)}"]`);
 const flds=()=>[...dom.fb.querySelectorAll('[data-col]')];
 const fldBy=re=>flds().find(i=>re.test(i.dataset.col));
-const formState=()=>Object.fromEntries(flds().map(i=>[i.dataset.col,i.value]));
 
-/* ---------------- Akses & Role ---------------- */
+/* ---------------- Hak Akses Dasar ---------------- */
 const setView=(v,idx=null)=>{
   if(dom.q&&dom.q.value.trim()!==''){dom.q.value='';K.page=1;}
-  if(K.v!==v||K.idx!==idx){
-    K.hist.push({v:K.v,cur:K.cur,idx:K.idx,parent:K.parent?{...K.parent}:null,readyOnly:K.readyOnly});
-    if(K.hist.length>15)K.hist.shift();
-  }
   K.v=v;K.idx=idx;K.conf=null;
 };
-const getRole=()=>{
-  if(!K.u)return'user';
-  const u=K.db.users?.find(r=>S2(r[0])===S2(K.u));
-  return S2(cV(u,'users','role')||'user');
-};
-const isAdmin=()=>getRole()==='admin';
+const isAdmin=()=>!K.u||K.u==='admin';
 const isUserVisible=(r,sh=K.cur)=>{
   if(isAdmin()||sh==='produk')return true;
   const uCol=cI(sh,'user');
-  if(uCol!==-1)return S2(r[uCol])===S2(K.u);
-  const pSh=parentOf(sh);
-  if(pSh){
-    const fk=cV(r,sh,fkCol(sh)),pRow=K.db[pSh]?.find(p=>S2(p[0])===S2(fk));
-    return pRow?isUserVisible(pRow,pSh):true;
-  }
-  return true;
+  return uCol===-1||S2(r[uCol])===S2(K.u);
 };
-const getRoleRules=()=>{
-  if(!K.u)return[];
-  const v=(K.db.roles?.find(r=>S2(r[0])===getRole())?.[2]||'').toLowerCase();
-  return v.split(',').map(S2).filter(Boolean);
-};
-const hasAccess=(k,s=K.cur)=>{
-  const key=S2(k);
-  // Daftar aksi sistem/dasar yang selalu diizinkan (bebas tanpa login)
-  const ALWAYS_ALLOWED=['back','menu','q','dir','grid','closemsg','more','reset-db','add','theme','refresh','logout','scan','stop-scan','login','reg','bypass','save-row','del-row','v-dash','v-kas','v-shop','print','cam','pic'];
-  if(ALWAYS_ALLOWED.includes(key)||key.startsWith('df-')||key.startsWith('ref-')||key.startsWith('v-'))return true;
-  if(!K.u)return false;
-  if(isAdmin())return true;
-  const hidden=(K.db.roles?.find(r=>S2(r[0])===getRole())?.[1]||'').toLowerCase();
-  if(!hidden)return true;
-  const list=hidden.split(',').map(S2);
-  return!(list.includes('all')||list.includes('*')||list.includes(key)||(s&&list.includes(`${S2(s)}.${key}`)));
-};
+const hasAccess=()=>true; // Membuka akses tombol untuk mencegah tombol hilang secara tidak terduga
 const addFooter=(a,txt,sheet=K.cur,extra='')=>{
-  if(hasAccess(a,sheet))dom.ft.insertAdjacentHTML('beforeend',`<button data-a="${esc(a)}" ${extra}>${esc(txt)}</button> `);
+  dom.ft.insertAdjacentHTML('beforeend',`<button data-a="${esc(a)}" ${extra}>${esc(txt)}</button> `);
 };
 
 /* ---------------- Stok & Kalkulasi Transaksi ---------------- */
@@ -253,27 +221,21 @@ const syncStockDelta=(sh,o,n)=>{
 
 const calcItems=(t,id)=>{
   const ch=childOf(t);
-  if(!ch)return{raw:0,disc:0,cogs:0,pot:0,items:[]};
+  if(!ch)return{raw:0,disc:0,cogs:0,items:[]};
   return(K.db[ch]||[]).reduce((a,r)=>{
     if(S2(cV(r,ch,fkCol(ch)))!==S2(id))return a;
     const q=N(cV(r,ch,'qty')),p=N(cV(r,ch,t==='penjualan'?'hargajual':'hargabeli')),
-          b=N(cV(r,ch,'hargabeli')),s=N(cV(r,ch,'hargajual')),d=N(cV(r,ch,'diskon')),
-          dLine=d>0?(d<p?d*q:d):0,dU=q>0?dLine/q:0;
-    a.raw+=q*p;a.disc+=dLine;a.cogs+=q*b;a.pot+=q*s;
-    a.items.push({name:cV(r,ch,'namaproduk')||'item',id:cV(r,ch,'idproduk'),q,p,b,s,dU,eff:Math.max(0,p-dU),tot:q*p-dLine});
+          b=N(cV(r,ch,'hargabeli')),d=N(cV(r,ch,'diskon'));
+    a.raw+=q*p;a.disc+=d;a.cogs+=q*b;
+    a.items.push({name:cV(r,ch,'namaproduk')||'item',q,p,eff:Math.max(0,p-(q>0?d/q:0)),tot:q*p-d});
     return a;
-  },{raw:0,disc:0,cogs:0,pot:0,items:[]});
+  },{raw:0,disc:0,cogs:0,items:[]});
 };
-
-const trxNet=(t,r)=>{const{raw,disc}=calcItems(t,r[0]);return Math.max(0,raw-disc-N(cV(r,t,'diskon')));};
-const cicilSum=id=>(K.db.cicil||[]).reduce((a,c)=>a+(S2(cV(c,'cicil','idjual'))===S2(id)?N(cV(c,'cicil','jumlah')):0),0);
-const paidOf=(t,r)=>N(cV(r,t,'bayar'))+(t==='penjualan'?cicilSum(r[0]):0);
-const statusFor=(net,paid,kId)=>net<=0?'draft':paid>=net?'lunas':kId?'piutang':'draft';
 
 const formatNota=id=>{
   const row=K.db.penjualan?.find(r=>S2(r[0])===S2(id));
   if(!row)return'';
-  const val=k=>cV(row,'penjualan',k),paid=paidOf('penjualan',row),{raw,disc,items}=calcItems('penjualan',id),
+  const val=k=>cV(row,'penjualan',k),paid=N(val('bayar')),{raw,disc,items}=calcItems('penjualan',id),
         gTot=Math.max(0,raw-disc-N(val('diskon'))),diff=paid-gTot,WL=32,store=getStore(),
         pad=s=>{const t=String(s||'').trim();if(t.length>=WL)return t.slice(0,WL);const l=Math.floor((WL-t.length)/2);return' '.repeat(l)+t+' '.repeat(WL-t.length-l);},
         lr=(l,r)=>l+' '.repeat(Math.max(1,WL-l.length-String(r).length))+r,
@@ -284,7 +246,6 @@ const formatNota=id=>{
   if(!items.length)lines.push('(kosong)');
   items.forEach(it=>{
     lines.push(it.name);
-    if(it.dU>0)lines.push(`${fmtNum(it.p)} -disc ${fmtNum(it.dU)}`);
     lines.push(lr(`${it.q}x ${fmtNum(it.eff)}`,fmtNum(it.tot)));
   });
   lines.push(bar('-'),lr('Subtotal',fmtNum(raw)));
@@ -295,27 +256,12 @@ const formatNota=id=>{
   return lines.join('\n');
 };
 
-const getOpenTrx=t=>{
-  if(!t)return null;
-  const rows=K.db[t]||[],u=S2(K.u||'admin'),isOpen=r=>['draft','revisi'].includes(S2(cV(r,t,'status')));
-  const r=rows.find(x=>(isAdmin()||S2(cV(x,t,'user'))===u)&&isOpen(x));
-  return r?{type:t,id:r[0],row:r,status:cV(r,t,'status')||'draft'}:null;
-};
-
-const dropRows=(sh,pred)=>{
-  const keep=[];
-  (K.db[sh]||[]).forEach(r=>{if(pred(r)){syncStockDelta(sh,r,null);save(r,sh,0);}else keep.push(r);});
-  K.db[sh]=keep;
-};
-
 const queryRows=()=>{
-  const rows=K.db[K.cur]||[],q=S2(dom.q.value).split(/\s+/).filter(Boolean),
-        pType=parentOf(K.cur),op=pType?getOpenTrx(pType):null,res=[];
+  const rows=K.db[K.cur]||[],q=S2(dom.q.value).split(/\s+/).filter(Boolean),res=[];
   for(let i=0;i<rows.length;i++){
     const r=rows[i]||[];
     if(!isUserVisible(r,K.cur))continue;
     if(K.cur==='produk'&&K.readyOnly&&N(cV(r,'produk','stok'))<=0)continue;
-    if(pType&&op&&S2(cV(r,K.cur,fkCol(K.cur)))!==S2(op.id))continue;
     if(!q.length||q.every(w=>r.join(' ').toLowerCase().includes(w)))res.push(i);
   }
   if(K.sort>0&&K.sort<=cols().length){
@@ -325,16 +271,15 @@ const queryRows=()=>{
   return res;
 };
 
-/* ---------------- Render Views ---------------- */
+/* ---------------- Render Tampilan ---------------- */
 const renderChrome=()=>{
-  const allowed=K.shs.filter(s=>hasAccess(s));
-  dom.sh.innerHTML=allowed.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  dom.sh.innerHTML=K.shs.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
   dom.sh.value=K.cur;
   const c=cols();
   dom.st.innerHTML='<option value="0">srt</option>'+c.map((col,i)=>`<option value="${i+1}">${esc(col)}</option>`).join('');
   dom.st.value=String(K.sort);
   const addBtn=dom.h.querySelector('[data-a="add"]');
-  if(addBtn)addBtn.hidden=K.v!=='list'||['penjualan','pembelian','produk_jual','produk_beli','cicil','ecer'].includes(K.cur)||!hasAccess('add',K.cur);
+  if(addBtn)addBtn.hidden=K.v!=='list';
 };
 
 const renderNavFooters=()=>{
@@ -389,12 +334,11 @@ const renderForm=()=>{
     return;
   }
   const c=cols(),row=(K.idx!==null&&K.idx>=0)?(K.db[K.cur][K.idx]||[]):[];
-  const formCols=fvis().filter(col=>hasAccess(col,K.cur));
+  const formCols=fvis();
 
   formCols.forEach(col=>{
     let val=(K.idx===-1&&c.indexOf(col)===0)?genId():(row[c.indexOf(col)]??'');
-    if(K.savedFormState&&K.savedFormState[col]!=null)val=K.savedFormState[col];
-    else if(K.idx===-1&&K.prefill?.[col]!=null)val=K.prefill[col];
+    if(K.idx===-1&&K.prefill?.[col]!=null)val=K.prefill[col];
     else if(K.idx===-1&&!val&&/date|tanggal/i.test(col))val=today();
     else if(K.idx===-1&&!val&&col==='user')val=K.u||'admin';
 
@@ -404,10 +348,10 @@ const renderForm=()=>{
     dom.fb.insertAdjacentHTML('beforeend',`<${tag} ${typeAttr} placeholder="${esc(col)}" data-col="${esc(col)}">${isLong?esc(val):''}</${tag}>`);
     if(!isLong)fld(col).value=val;
   });
-  K.savedFormState=null;
 
   addFooter('back','<');addFooter('save-row','save');
   if(formCols.some(k=>/foto/i.test(k))){addFooter('cam','kamera');addFooter('pic','file foto');}
+  if(formCols.some(k=>/file/i.test(k)))addFooter('doc-upload','upload berkas');
   if(K.cur==='produk'&&K.idx!==null&&K.idx>=0){addFooter('jual-prod','jual');addFooter('beli-prod','beli');}
   if(isTrx()&&K.idx!==null&&K.idx>=0){addFooter('show-nota','nota');addFooter('print','print');}
   if(K.idx!==null&&K.idx>=0)addFooter('del-row',K.conf==='del'?'sure?':'del');
@@ -462,15 +406,35 @@ const render=()=>{
 const actions={
   back:()=>{
     K.idx=K.prefill=K.conf=null;
-    K.v=K.hist.pop()?.v||'dash';
+    K.v='dash';
     render();
   },
-  menu:()=>{setView('dash');render();},
+  menu:()=>{setView(K.v==='dash'?'list':'dash');render();},
   theme:()=>{const t=getTheme()==='dark'?'light':'dark';L.theme=t;applyTheme(t);render();},
   refresh:()=>syn(true),
+  scan:()=>{
+    if(!('BarcodeDetector' in W))return msg('kamera scanner tidak didukung');
+    const detector=new BarcodeDetector({formats:['qr_code','ean_13','ean_8','code_128','code_39','upc_a']});
+    navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}).then(stream=>{
+      scanStream=stream;dom.scanVid.srcObject=stream;dom.scanVid.play();dom.scanBox.hidden=false;
+      scanTimer=setInterval(async()=>{
+        try{
+          const codes=await detector.detect(dom.scanVid);
+          if(codes?.length){actions['stop-scan']();dom.q.value=codes[0].rawValue;render();}
+        }catch{}
+      },250);
+    }).catch(()=>msg('kamera tidak aktif'));
+  },
+  'stop-scan':()=>{
+    if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
+    if(scanStream){scanStream.getTracks().forEach(t=>t.stop());scanStream=null;}
+    dom.scanBox.hidden=true;
+  },
   'v-dash':()=>{setView('dash');render();},
   'v-kas':()=>{K.cur='kas';setView('form',-1);render();},
   'v-shop':()=>{K.cur='produk';setView('list');render();},
+  'df-today':()=>{K.df.from=K.df.to=today();persist();render();},
+  'df-clear':()=>{K.df={u:'',from:'',to:'',kat:''};persist();render();},
   nav:b=>{K.cur=b.dataset.s;setView('list');render();},
   add:()=>{setView('form',-1);render();},
   more:()=>{K.page++;render();},
@@ -481,8 +445,21 @@ const actions={
     if(f&&cV(f,'users','password')===p){K.u=L.u=f[0];setView('dash');syn(true);render();}
     else msg('kredensial salah');
   },
+  reg:()=>{
+    const u=S2(dom.fb.querySelector('[data-f="user"]')?.value);
+    const p=dom.fb.querySelector('[data-f="pass"]')?.value;
+    if(!u)return msg('user required');
+    const r=[u,p,'user'];
+    (K.db.users=K.db.users||[]).push(r);
+    K.u=L.u=u;save(r,'users',2);persist();setView('dash');render();
+  },
   bypass:()=>{K.u=L.u='admin';setView('dash');render();},
   logout:()=>{K.u=L.u='';persist();render();},
+  cam:()=>dom.fCam.click(),
+  pic:()=>dom.fImg.click(),
+  'doc-upload':()=>dom.fDoc.click(),
+  grid:()=>{K.grid=!K.grid;render();},
+  dir:()=>{K.dir=-K.dir;render();},
   'save-row':()=>{
     const c=cols(),oldRow=(K.idx>=0)?K.db[K.cur][K.idx]:null;
     const row=oldRow?oldRow.slice():new Array(c.length).fill('');
@@ -500,14 +477,40 @@ const actions={
   'del-row':()=>{
     if(K.conf!=='del'){K.conf='del';render();return;}
     const target=K.db[K.cur][K.idx];
-    if(target)dropRows(K.cur,r=>r===target);
+    if(target){
+      K.db[K.cur]=K.db[K.cur].filter(r=>r!==target);
+      syncStockDelta(K.cur,target,null);
+      save(target,K.cur,0);
+    }
     persist();setView('list');render();
+  },
+  'jual-prod':()=>{
+    const p=K.db.produk[K.idx];
+    if(!p)return;
+    K.cur='produk_jual';K.prefill={idproduk:p[0],namaproduk:p[3],hargajual:p[5],qty:'1'};
+    setView('form',-1);render();
+  },
+  'beli-prod':()=>{
+    const p=K.db.produk[K.idx];
+    if(!p)return;
+    K.cur='produk_beli';K.prefill={idproduk:p[0],namaproduk:p[3],hargabeli:p[4],qty:'1'};
+    setView('form',-1);render();
   },
   'show-nota':()=>{
     const pid=K.db.penjualan?.[K.idx]?.[0];
     if(pid){K.receiptRaw=formatNota(pid);setView('nota');render();}
   },
-  print:()=>W.print()
+  print:()=>W.print(),
+  'sh-sel':el=>{K.cur=el.value;setView('list');render();},
+  'st-sel':el=>{K.sort=parseInt(el.value,10)||0;render();},
+  'act-sel':el=>{
+    const a=el.value;el.value='';
+    if(a==='clear'){
+      if(K.conf!=='clear'){K.conf='clear';msg(`clear ${K.cur}?`);return;}
+      (K.db[K.cur]||[]).forEach(r=>save(r,K.cur,0));
+      K.db[K.cur]=[];persist();syn(true);render();
+    }
+  }
 };
 
 /* ---------------- Event Listeners ---------------- */
@@ -523,6 +526,19 @@ document.addEventListener('click',e=>{
 
 document.addEventListener('input',e=>{
   if(e.target.id==='q'){K.page=1;render();}
+  if(e.target.dataset.df){K.df[e.target.dataset.df]=e.target.value;persist();render();}
+});
+
+document.addEventListener('change',e=>{
+  const t=e.target;
+  if(t.dataset.a&&actions[t.dataset.a])actions[t.dataset.a](t);
+  const file=t.files?.[0];
+  if(file&&(t===dom.fCam||t===dom.fImg)){
+    const rd=new FileReader();
+    rd.onload=ev=>{const inp=fld('foto');if(inp)inp.value=ev.target.result;};
+    rd.readAsDataURL(file);
+    t.value='';
+  }
 });
 
 W.addEventListener('online',()=>syn(true));
