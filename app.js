@@ -13,21 +13,6 @@ bc.onmessage=e=>{
   else if(e.data==='kick'&&!syncing)syn();
 };
 
-/* ---------------- Kripto: password salted-hash ('salt$hash') ---------------- */
-const sha256Hex=async s=>{
-  if(!W.crypto?.subtle)throw new Error('hash password butuh https (secure context)');
-  const b=await W.crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(s)));
-  return[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
-};
-const randHex=n=>[...W.crypto.getRandomValues(new Uint8Array(n))].map(x=>x.toString(16).padStart(2,'0')).join('');
-const isHashPass=v=>/^[0-9a-f]{8,16}\$[0-9a-f]{64}$/.test(String(v||''));
-const mkPass=async pw=>{const s=randHex(8);return s+'$'+await sha256Hex(s+String(pw??''));};
-const verifyPass=async(pw,stored)=>{
-  const[salt,hash]=String(stored||'').split('$');
-  return(salt&&hash)?await sha256Hex(salt+String(pw??''))===hash:null; // null = format lama (plaintext)
-};
-const clearToks=()=>{L.tok_d1=L.tok_gas='';};
-
 /* ---------------- IndexedDB: store 'kv' (matrix) & 'mut' (antrean mutasi) ---------------- */
 function initDB(cb){
   try{
@@ -83,49 +68,23 @@ async function req(p={}){
   p.u=p.u||L.u||K.u||'admin';
   if(HARD.d1Url&&SYNC_ACTIONS.includes(p.a)){
     try{
-      const res=await fetch(HARD.d1Url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...p,tok:L.tok_d1||''}),signal:sig()});
-      const r=await res.json().catch(()=>null); // baca walau status 401 dsb.
-      if(r){if(isOk(r))return r;if(r?.auth){clearToks();return r;}}
+      const res=await fetch(HARD.d1Url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p),signal:sig()});
+      if(res.ok){const r=await res.json();if(isOk(r))return r;}
     }catch{}
   }
   return new Promise(res=>{
     const done=j=>res({ok:j?.ok??j?.s==='ok',...j});
     if(W.google?.script?.run){
-      W.google.script.run.withSuccessHandler(done).withFailureHandler(e=>res({ok:false,e})).core({...p,tok:L.tok_gas||''});
+      W.google.script.run.withSuccessHandler(done).withFailureHandler(e=>res({ok:false,e})).core(p);
       return;
     }
     if(HARD.gasUrl&&/^https?:\/\//i.test(HARD.gasUrl)){
-      fetch(HARD.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({...p,tok:L.tok_gas||''}),redirect:'follow',signal:sig()})
-        .then(r=>r.json()).then(j=>{if(j?.auth)clearToks();done(j);}).catch(e=>res({ok:false,e}));
+      fetch(HARD.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(p),redirect:'follow',signal:sig()})
+        .then(r=>r.json()).then(done).catch(e=>res({ok:false,e}));
       return;
     }
     res({ok:false,e:'offline'});
   });
-}
-
-/* Login server: verifikasi password di backend -> token per backend (D1 & GAS).
-   User terdaftar offline (belum ada di server) otomatis register bila server membukanya. */
-async function gasCall(p){
-  if(W.google?.script?.run)return new Promise(res=>{W.google.script.run.withSuccessHandler(res).withFailureHandler(()=>res(null)).core(p);});
-  if(HARD.gasUrl&&/^https?:\/\//i.test(HARD.gasUrl)){
-    try{const r=await fetch(HARD.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(p),redirect:'follow',signal:sig()});return await r.json();}catch{return null;}
-  }
-  return null;
-}
-async function authRemote(u,pw){
-  let got=false;
-  if(HARD.d1Url){
-    try{
-      const post=async a=>{const r=await fetch(HARD.d1Url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({a,u,pw}),signal:sig()});return await r.json().catch(()=>null);};
-      let r=await post('auth');
-      if(r?.ok&&r.tok){L.tok_d1=r.tok;got=true;}
-      else if(r?.auth&&r.why==='unknown'){r=await post('register');if(r?.ok&&r.tok){L.tok_d1=r.tok;got=true;}}
-    }catch{}
-  }
-  let g=await gasCall({a:'auth',u,pw});
-  if(g?.ok&&g.tok){L.tok_gas=g.tok;got=true;}
-  else if(g?.auth&&g.why==='unknown'){g=await gasCall({a:'register',u,pw});if(g?.ok&&g.tok){L.tok_gas=g.tok;got=true;}}
-  return got;
 }
 
 /* ---------------- Sync: push mutasi -> manifest -> pull yang berubah ---------------- */
@@ -134,7 +93,7 @@ async function syn(force=false){
   if(!navigator.onLine||!db)return false;
   if(syncing){again=Math.max(again,force?2:1);return false;}
   syncing=true;msg('sedang sync...');
-  let ok=false,authFail=false;
+  let ok=false;
   try{
     const tables=[...K.shs],mark=saves;
     if(force)L.vs='[]';
@@ -142,18 +101,18 @@ async function syn(force=false){
 
     // 1. MANIFEST: pastikan tabel ada di server + ambil versi
     const r0=await req({a:'manifest',tn:tables,cols:K.cols});
-    if(r0?.auth){authFail=true;throw new Error('auth');}
     let m=r0?.data||r0;
     if(!m?.v)throw new Error('manifest');
     if(Array.isArray(m.shs))m.shs.forEach(s=>{if(!K.shs.includes(s))K.shs.push(s);});
     if(m.cols&&typeof m.cols==='object')Object.assign(K.cols,m.cols);
+    if(m.vis&&typeof m.vis==='object')Object.assign(K.vis,m.vis);
 
     // 2. PUSH: antrean mutasi (FIFO) + isi awal tabel yang masih kosong di server
     const queued=await idbGetAll('mut'),seed=[];
     tables.forEach((t,i)=>{if(m.v[i]==='0_0')(K.db[t]||[]).forEach(row=>seed.push({tn:t,y:2,r:row}));});
     if(queued.length||seed.length){
-      const pr=await req({a:'push',m:[...seed,...queued],tn:tables,cols:K.cols});
-      if(!pr?.ok){if(pr?.auth)authFail=true;throw new Error('push');}
+      const pr=await req({a:'push',m:[...seed,...queued],tn:tables,cols:K.cols,gasUrl:HARD.gasUrl});
+      if(!pr?.ok)throw new Error('push');
       idbDelKeys(queued.map(x=>x.i),'mut');
       m=pr.manifest||m;
     }
@@ -163,7 +122,6 @@ async function syn(force=false){
     tables.forEach((_,i)=>{if(force||(m.v[i]&&m.v[i]!==ver[i]))toPull.push({t:i});});
     if(toPull.length){
       const b=await req({a:'pull_batch',reqs:toPull,tn:tables,cols:K.cols});
-      if(b?.auth){authFail=true;throw new Error('auth');}
       // Ada perubahan lokal baru selama sync -> buang hasil pull (akan menimpanya), ulangi sync
       if(saves!==mark||(await idbGetAll('mut')).length)again=Math.max(again,1);
       else{
@@ -184,7 +142,7 @@ async function syn(force=false){
     const a=again;again=0;
     if(a)setTimeout(()=>syn(a===2),0);
   }
-  msg(ok?'':(authFail?'sesi berakhir — login ulang':'offline'));
+  msg(ok?'':'offline');
   return ok;
 }
 
@@ -253,10 +211,10 @@ const PRESETS={
 
 const genId=()=>{const d=new Date();return String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0')+Math.random().toString(36).slice(2,5).padEnd(3,'0');};
 const fmtNum=n=>N(n).toLocaleString('id-ID');
-const today=()=>new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10); // tanggal lokal, bukan UTC
+const today=()=>new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);
 const msg=t=>{dom.msg.innerHTML='';dom.msg.hidden=!t;if(t)dom.msg.textContent=t;};
 
-/* Tema light / dark (default: ikut sistem sampai tombol ditekan) */
+/* Tema light / dark */
 const getTheme=()=>L.theme||(W.matchMedia?.('(prefers-color-scheme: dark)').matches?'dark':'light');
 const applyTheme=t=>{
   document.documentElement.dataset.theme=t;
@@ -278,10 +236,12 @@ const setView=(v,idx=null)=>{
   }
   K.v=v;K.idx=idx;K.conf=null;
 };
+const pwCol=()=>cols('users').includes('pass')&&!cols('users').includes('password')?'pass':'password';
+const userRow=(u,role,pw)=>cols('users').map(c=>({user:u,role,[pwCol()]:pw}[c]??''));
 const getRole=()=>{
   if(!K.u)return'user';
   const u=K.db.users?.find(r=>S2(r[0])===S2(K.u));
-  return S2(u?.[1]||'user');
+  return S2(cV(u,'users','role')||'user');
 };
 const isAdmin=()=>getRole()==='admin';
 const isUserVisible=(r,sh=K.cur)=>{
@@ -315,14 +275,14 @@ const addFooter=(a,txt,sheet=K.cur,extra='')=>{
 };
 
 /* ---------------- Stok ---------------- */
-const Z=v=>parseFloat(String(v??'').replace(/[^\d.-]/g,''))||0; // angka bertanda (stok boleh negatif)
+const Z=v=>parseFloat(String(v??'').replace(/[^\d.-]/g,''))||0;
 const syncStockDelta=(sh,o,n)=>{
   if(!STOCK_SHEETS.includes(sh))return;
   const m=sh==='produk_beli'?1:-1,si=cI('produk','stok');
   [{r:o,s:-m},{r:n,s:m}].forEach(({r,s})=>{
     if(!r)return;
     const id=cV(r,sh,'idproduk'),row=id&&K.db.produk?.find(k=>S2(k[0])===S2(id));
-    if(row&&si>-1){row[si]=String(Z(row[si])+N(cV(r,sh,'qty'))*s);save(row,'produk',1);} // stok ikut antrean mutasi
+    if(row&&si>-1){row[si]=String(Z(row[si])+N(cV(r,sh,'qty'))*s);save(row,'produk',1);}
   });
 };
 
@@ -330,6 +290,7 @@ const syncStockDelta=(sh,o,n)=>{
 const stopScan=()=>{
   if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
   if(scanStream){scanStream.getTracks().forEach(t=>t.stop());scanStream=null;}
+  if(dom.scanVid)dom.scanVid.srcObject=null;
   dom.scanBox.hidden=true;
 };
 const startScan=()=>{
@@ -411,10 +372,10 @@ const formatNota=id=>{
   return lines.join('\n');
 };
 
-const syncTrx=(t,id=null)=>{
-  const target=id||(K.parent?.type===t?K.parent.id:null)||(K.idx>=0?K.db[t]?.[K.idx]?.[0]:null); // id eksplisit > parent (khusus t) > index
-  if(!target)return;
-  const r=K.db[t]?.find(x=>S2(x[0])===S2(target));
+const syncTrx=t=>{
+  const id=K.parent?.id||(K.idx>=0?K.db[t]?.[K.idx]?.[0]:null);
+  if(!id)return;
+  const r=K.db[t]?.find(x=>S2(x[0])===S2(id));
   if(!r)return;
   const sI=cI(t,'status');
   if(sI>-1&&r[sI]!=='revisi')r[sI]=statusFor(trxNet(t,r),paidOf(t,r),cV(r,t,'idkontak'));
@@ -554,7 +515,7 @@ const renderDash=()=>{
     if(passFlt(cV(r,'kas','user'),cV(r,'kas','date'),`${cV(r,'kas','kategori')} ${cV(r,'kas','uraian')}`)){mFil+=m;kFil+=k;}
   });
 
-  // Cicilan (semua & terfilter)
+  // Cicilan
   const cMap={},cFilMap={};
   (K.db.cicil||[]).forEach(c=>{
     if(!isUserVisible(c,'cicil'))return;
@@ -635,27 +596,25 @@ const renderDash=()=>{
 };
 
 const renderForm=()=>{
-  // Login
   if(!K.u){
     dom.fb.innerHTML='<input placeholder="user" autocomplete="off" data-f="user"><input type="password" placeholder="password" data-f="pass">';
     addFooter('login','login');addFooter('reg','register');addFooter('bypass','bypass admin');
     return;
   }
 
-  // Detail CMS
   if(K.cur==='cms'&&K.v==='cms_detail'){
     const r=K.db.cms?.[K.idx]||[],g=k=>cV(r,'cms',k),foto=isSafeUrl(g('foto'))?g('foto'):'',file=g('file');
     dom.fb.innerHTML=`<b>${esc(g('judul')||'-')}</b>
     <small>${esc(g('date'))} ${g('user')?'| '+esc(g('user')):''} ${g('kategori')?'| '+esc(g('kategori')):''} ${g('status')?'| ['+esc(g('status'))+']':''}</small>
     <p>${esc(g('konten'))}</p>
-    ${foto?`<img src="${esc(foto)}" alt="cms"><br>`:''}`;
+    ${foto?`<img src="${esc(foto)}" alt="cms"><br>`:''}
+    ${file?`<button data-a="dl-cms-file">unduh lampiran</button><br>`:''}`;
     addFooter('back','<');
     if(file)addFooter('dl-cms-file','unduh file');
     addFooter('edit-cms','edit');renderNavFooters();
     return;
   }
 
-  // Form konfigurasi
   if(K.v==='bulksheet'){
     dom.fb.innerHTML=`<textarea rows="10" placeholder="sheet:kolom,kolom">${esc(K.shs.map(s=>`${s}:${(K.cols[s]||[]).join(',')}`).join('\n'))}</textarea>`;
     addFooter('back','<');addFooter('save-bulksheet','save');renderNavFooters();
@@ -674,7 +633,6 @@ const renderForm=()=>{
     return;
   }
 
-  // Form baris
   const c=cols(),bypassAdd=K.idx===-1&&['produk','kas'].includes(K.cur),
         formCols=bypassAdd?fvis():fvis().filter(col=>hasAccess(col,K.cur)),
         row=(K.idx!==null&&K.idx>=0)?(K.db[K.cur][K.idx]||[]):[],
@@ -686,7 +644,7 @@ const renderForm=()=>{
   }else msg();
 
   formCols.forEach(col=>{
-    let val=(K.idx===-1&&c.indexOf(col)===0&&/^id/i.test(col))?genId():(row[c.indexOf(col)]??''); // genId hanya kolom id (user/role tidak diacak)
+    let val=(K.idx===-1&&c.indexOf(col)===0)?genId():(row[c.indexOf(col)]??'');
     if(K.savedFormState&&K.savedFormState[col]!=null)val=K.savedFormState[col];
     else if(K.idx===-1&&K.prefill?.[col]!=null)val=K.prefill[col];
     else if(K.idx===-1&&!val&&/date|tanggal/i.test(col))val=today();
@@ -694,15 +652,12 @@ const renderForm=()=>{
     else if(K.idx===-1&&!val&&K.cur==='cms'&&col==='status')val='publish';
     else if(K.idx===-1&&!val&&K.cur==='roles'&&col==='hide')val=PRESETS.kasir.hide;
     else if(K.idx===-1&&!val&&K.cur==='roles'&&col==='validasi')val='wajibstok,wajibkontak';
-    if(K.cur==='users'&&S2(col)==='pass')val=(K.savedFormState&&K.savedFormState[col]!=null)?K.savedFormState[col]:''; // hash password tidak pernah diecho
-    const isLong=/catatan|alamat|uraian|konten|akses|hide|validasi/i.test(col),tag=isLong?'textarea':'input',typeAttr=/date|tanggal/i.test(col)?'type="date"':'',
-          ph=(K.cur==='users'&&S2(col)==='pass')?'pass (kosong=tetap)':col;
-    dom.fb.insertAdjacentHTML('beforeend',`<${tag} ${typeAttr} placeholder="${esc(ph)}" value="${esc(val)}" data-col="${esc(col)}">${isLong?esc(val):''}</${tag}>`);
+    const isLong=/catatan|alamat|uraian|konten|akses|hide|validasi/i.test(col),tag=isLong?'textarea':'input',typeAttr=/date|tanggal/i.test(col)?'type="date"':'';
+    dom.fb.insertAdjacentHTML('beforeend',`<${tag} ${typeAttr} placeholder="${esc(col)}" value="${esc(val)}" data-col="${esc(col)}">${isLong?esc(val):''}</${tag}>`);
     updateFormThumb(fld(col));
   });
   K.savedFormState=null;
 
-  // Lokasi otomatis bila role mewajibkan
   if(K.idx===-1&&getRoleRules().includes('wajiblokasi')){
     const loc=fldBy(GEO_RE);
     if(loc&&!loc.value&&navigator.geolocation)
@@ -764,7 +719,7 @@ const renderList=isBulkEdit=>{
       el.textContent=r.join('|');
     }else{
       if(K.grid&&imgI!==-1&&isSafeUrl(r[imgI])){addThumb(el,r[imgI],'prod');el.appendChild(document.createElement('br'));}
-      else if(cmsFotoI!==-1&&isSafeUrl(r[cmsFotoI])){addThumb(el,r[cmsFotoI],'cms');el.appendChild(document.createTextNode(' '));}
+      if(cmsFotoI!==-1&&isSafeUrl(r[cmsFotoI])){addThumb(el,r[cmsFotoI],'cms');el.appendChild(document.createTextNode(' '));}
       el.appendChild(document.createTextNode(eff.map(i=>{
         const val=r[i];
         if(!val||(K.cur==='cms'&&i===cmsFotoI))return'';
@@ -838,46 +793,38 @@ const render=()=>{
 
 /* ---------------- Actions ---------------- */
 const loginCreds=()=>{const g=k=>dom.fb.querySelector(`[data-f="${k}"]`)?.value||'';return[S2(g('user')),g('pass').trim()];};
-const enter=async pw=>{persist();if(pw!=null)await authRemote(K.u,pw);syn(true);setView('dash',null);msg();render();};
+const enter=()=>{persist();syn(true);setView('dash',null);msg();render();};
 
 const actions={
   closemsg:()=>{K.conf=null;msg();render();},
   scan:()=>startScan(),
   'stop-scan':()=>stopScan(),
 
-  login:async()=>{
+  login:()=>{
     const[u,p]=loginCreds();
     if(!u)return msg('user required');
     const f=K.db.users?.find(r=>S2(r[0])===u);
-    if(f){
-      if(f[2]){
-        const ok=isHashPass(f[2])?await verifyPass(p,f[2]):f[2]===p; // plaintext lama dibanding langsung
-        if(!ok)return msg('password salah');
-        if(!isHashPass(f[2])){f[2]=await mkPass(p);save(f,'users',1);persist();} // migrasi ke hash
-      }
-      K.u=L.u=f[0];
-    }
-    else if(!K.db.users?.length&&u==='admin'){const adm=['admin','admin',await mkPass(p||'admin')];K.db.users=[adm];save(adm,'users',2);K.u=L.u='admin';}
+    if(f){const pw=cV(f,'users',pwCol());if(pw&&pw!==p)return msg('password salah');K.u=L.u=f[0];}
+    else if(!K.db.users?.length&&u==='admin'){const adm=userRow('admin','admin','admin');K.db.users=[adm];save(adm,'users',2);K.u=L.u='admin';}
     else return msg('user tidak terdaftar');
-    clearToks();
-    await enter(p);
+    enter();
   },
-  reg:async()=>{
+  reg:()=>{
     const[u,p]=loginCreds();
     if(!u)return msg('user required');
     if(K.db.users?.some(r=>S2(r[0])===u))return msg('user sudah ada');
-    const row=[u,'user',await mkPass(p)];
+    const row=userRow(u,'user',p);
     (K.db.users=K.db.users||[]).push(row);
-    K.u=L.u=u;persist();save(row,'users',2);clearToks();await enter(p);
+    K.u=L.u=u;persist();save(row,'users',2);setView('dash',null);msg();render();
   },
-  bypass:async()=>{
+  bypass:()=>{
     K.db.users=K.db.users||[];
     if(!K.db.users.find(r=>S2(r[0])==='admin')){
-      const adm=['admin','admin',await mkPass('admin')];
+      const adm=userRow('admin','admin','admin');
       K.db.users.unshift(adm);save(adm,'users',2);
     }
     K.u=L.u='admin';
-    clearToks();await enter('admin');
+    enter();
   },
   back:()=>{
     stopScan();
@@ -962,7 +909,7 @@ const actions={
     persist();syn(true);setView('list',null);render();
   },
 
-  'save-row':async()=>{
+  'save-row':()=>{
     if(K.writing)return;
     K.writing=true;
     try{
@@ -971,15 +918,8 @@ const actions={
       while(row.length<c.length)row.push('');
       flds().forEach(inp=>{const ci=c.indexOf(inp.dataset.col);if(ci!==-1)row[ci]=inp.value.trim();});
 
-      // Password users: kosong = pertahankan lama; teks baru = hash; sudah hash = tetap
-      if(K.cur==='users'){
-        const pi=c.indexOf('pass');
-        if(pi>-1)row[pi]=row[pi]?(isHashPass(row[pi])?row[pi]:await mkPass(row[pi])):(oldRow?.[pi]||'');
-      }
-
       if(row[0]&&(K.db[K.cur]||[]).some((r,i)=>i!==K.idx&&S2(r[0])===S2(row[0])))return msg('id sudah ada');
 
-      // Validasi role
       const rules=getRoleRules(),valOf=k=>row[c.indexOf(k)]||'';
       const geoCol=c.find(k=>GEO_RE.test(k)),fotoCol=c.find(k=>/foto/i.test(k));
       if(rules.includes('wajiblokasi')&&geoCol&&!valOf(geoCol))return msg('lokasi kosong');
@@ -994,7 +934,6 @@ const actions={
         if(pRow&&need>Z(cV(pRow,'produk','stok')))return msg('stok kurang');
       }
 
-      // Item transaksi baru -> pastikan induk ada
       const pType=parentOf(K.cur);
       if(pType&&K.idx===-1){
         if(!K.parent||K.parent.type!==pType)K.parent=getOpenTrx(pType)||{type:pType,id:genId(),open:true};
@@ -1013,7 +952,6 @@ const actions={
       }
       if(!row[0])row[0]=genId();
 
-      // Status transaksi
       if(isTrx()){
         const sI=cI(K.cur,'status');
         if(sI===-1||row[sI]!=='revisi'){
@@ -1023,16 +961,15 @@ const actions={
         }
       }
 
-      // Simpan
       if(K.idx===-1){(K.db[K.cur]=K.db[K.cur]||[]).push(row);syncStockDelta(K.cur,null,row);save(row,K.cur,2);}
       else if(K.idx>=0){
-        if(oldRow&&oldRow[0]!==row[0])save(oldRow,K.cur,0); // ID diubah: hapus baris lama agar tidak yatim di server
+        if(oldRow&&oldRow[0]!==row[0])save(oldRow,K.cur,0);
         K.db[K.cur][K.idx]=row;syncStockDelta(K.cur,oldRow,row);save(row,K.cur,1);
       }
       persist();
-      if(pType&&K.parent?.id)syncTrx(pType,K.parent.id);
-      if(isTrx()&&row[0]){syncTrx(K.cur,row[0]);const st=S2(cV(row,K.cur,'status'));if(st!=='draft'&&st!=='revisi')K.parent=null;}
-      if(K.cur==='cicil'&&cV(row,'cicil','idjual'))syncTrx('penjualan',cV(row,'cicil','idjual'));
+      if(pType&&K.parent?.id)syncTrx(pType);
+      if(isTrx()&&row[0]){syncTrx(K.cur);const st=S2(cV(row,K.cur,'status'));if(st!=='draft'&&st!=='revisi')K.parent=null;}
+      if(K.cur==='cicil'&&cV(row,'cicil','idjual'))syncTrx('penjualan');
 
       const justTrxId=isTrx()?row[0]:null,wasPenjualan=K.cur==='penjualan';
       K.prefill=K.conf=K.prodIdx=K.savedFormState=null;
@@ -1050,6 +987,7 @@ const actions={
     if(!target)return;
     const id=target[0],pType=parentOf(K.cur),pid=pType?(target[cI(K.cur,fkCol(K.cur))]||K.parent?.id):null,
           delCicilJual=K.cur==='cicil'?cV(target,'cicil','idjual'):null;
+    K.idx=null;
     dropRows(K.cur,r=>r===target);
     if(isTrx()&&id)dropTrxDeps(K.cur,id);
     if(K.cur==='kontak'&&id){
@@ -1059,8 +997,8 @@ const actions={
       });
     }
     persist();
-    if(pType&&pid)syncTrx(pType,pid);
-    if(delCicilJual)syncTrx('penjualan',delCicilJual);
+    if(pType&&pid)syncTrx(pType);
+    if(delCicilJual)syncTrx('penjualan');
     setView('list',null);render();
   },
   'dup-row':()=>{
@@ -1083,7 +1021,7 @@ const actions={
     if(!kId)return;
     const trg=K.db[pType]?.find(x=>S2(x[0])===S2(op.id));
     if(trg&&cI(pType,'idkontak')!==-1){trg[cI(pType,'idkontak')]=kId;save(trg,pType,1);}
-    persist();syncTrx(pType,op.id);
+    persist();syncTrx(pType);
     K.cur=pType;setView('form',(K.db[pType]||[]).indexOf(trg));render();
   },
   'pay-pas':()=>{
@@ -1189,24 +1127,23 @@ const actions={
     }
     setView('list',null);render();
   },
-  'save-bulk':async()=>{
-    const n=cols().length,pi=K.cur==='users'?cI(K.cur,'pass'):-1,items=[];
+  'save-bulk':()=>{
+    const n=cols().length;
     dom.ls.querySelectorAll('[data-idx]').forEach(div=>{
       const idx=parseInt(div.dataset.idx,10);
       if(isNaN(idx)||!K.db[K.cur][idx])return;
       const p=div.textContent.split('|').map(s=>s.trim());
       while(p.length<n)p.push('');
-      items.push({idx,row:p.slice(0,n)});
+      const row=p.slice(0,n);
+      K.db[K.cur][idx]=row;save(row,K.cur,1);
     });
-    if(pi>-1)await Promise.all(items.filter(x=>x.row[pi]&&!isHashPass(x.row[pi])).map(x=>mkPass(x.row[pi]).then(h=>{x.row[pi]=h;})));
-    items.forEach(x=>{K.db[K.cur][x.idx]=x.row;save(x.row,K.cur,1);});
     persist();syn(true);setView('list',null);render();
   },
 
   grid:()=>{K.grid=!K.grid;render();},
   dir:()=>{K.dir=-K.dir;K.page=1;render();},
   more:()=>{K.page++;render();},
-  logout:()=>{K.u=L.u='';clearToks();K.hist=[];K.readyOnly=false;persist();render();},
+  logout:()=>{K.u=L.u='';K.hist=[];K.readyOnly=false;persist();render();},
   cam:()=>dom.fCam.click(),
   pic:()=>dom.fImg.click(),
   'doc-upload':()=>dom.fDoc.click(),
@@ -1240,13 +1177,8 @@ const actions={
     else if(a==='imp')dom.fImp.click();
     else if(a==='clear'){
       if(K.conf!=='clear'){K.conf='clear';msg(`clear ${K.cur}?`);return;}
-      if(isTrx()){ // hapus baris anak (+ restok via syncStockDelta) sebelum induknya
-        const ch=childOf(K.cur);
-        if(ch&&K.shs.includes(ch))dropRows(ch,()=>true);
-        if(K.cur==='penjualan')dropRows('cicil',()=>true);
-      }
-      dropRows(K.cur,()=>true); // antre hapus per baris + restok untuk sheet stok
-      K.conf=null;persist();syn(true);render();
+      (K.db[K.cur]||[]).forEach(r=>save(r,K.cur,0));
+      K.db[K.cur]=[];K.conf=null;persist();syn(true);render();
     }
   },
   'preset-kasir':()=>applyPreset('kasir'),
@@ -1263,7 +1195,7 @@ function applyPreset(name){
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-a]');
   if(b){
-    if(b.tagName==='SELECT')return; // select ditangani event change
+    if(b.tagName==='SELECT')return;
     const a=b.dataset.a;
     if(a.startsWith('ref-')){
       const cName=b.dataset.refCol||'',val=cName?(fld(cName)?.value||''):'';
@@ -1272,13 +1204,12 @@ document.addEventListener('click',e=>{
       return render();
     }
     if(!['del-row','clear-items','act-sel','reset-db'].includes(a)&&K.conf){K.conf=null;msg();}
-    return Promise.resolve(actions[a]?.(b,e)).catch(err=>msg(err?.message||String(err)));
+    return actions[a]?.(b,e);
   }
 
   const r=e.target.closest('#list>[data-idx]');
   if(r&&K.v==='list'&&K.idx===null){
     const idx=parseInt(r.dataset.idx,10);
-    // Mode pilih referensi: kembalikan id ke form sebelumnya
     if(K.refTargetInp&&K.hist.length){
       const prev=K.hist.pop(),selId=K.db[K.cur]?.[idx]?.[0]||'';
       K.cur=prev.cur;K.v=prev.v;K.idx=prev.idx;K.parent=prev.parent;K.readyOnly=Boolean(prev.readyOnly);
@@ -1318,7 +1249,6 @@ document.addEventListener('input',e=>{
       if(val===''&&btn)btn.remove();
       else if(val!==''&&!btn&&K.shs.includes(trg)&&(K.db[trg]||[]).length>0)addFooter(`ref-${trg}`,`ref ${trg}`,K.cur,`data-ref-col="${esc(col)}"`);
     }
-    // Auto-isi dari produk
     if(['idproduk','namaproduk'].includes(col)&&K.cur!=='produk'){
       const q=S2(val),f=q&&K.db.produk?.find(p=>S2(cV(p,'produk','idproduk')||p[0])===q||S2(cV(p,'produk','namaproduk'))===q);
       if(f)flds().forEach(inp=>{const fi=cI('produk',inp.dataset.col);if(fi!==-1)inp.value=f[fi]||'';});
@@ -1328,21 +1258,17 @@ document.addEventListener('input',e=>{
 
 const readFile=(file,mode,cb)=>{const rd=new FileReader();rd.onload=ev=>cb(ev.target.result||'');rd[mode](file);};
 
-async function importText(text){
+function importText(text){
   const lines=text.split(/\r?\n/).filter(Boolean);
   if(!lines.length)return;
   const sep=lines[0].includes('\t')?'\t':(lines[0].includes(';')?';':','),c=cols(),
         start=lines[0].split(sep).map(s=>s.trim().toLowerCase()).every(h=>c.includes(h))?1:0;
-  const rows=[];
   for(let i=start;i<lines.length;i++){
     const parts=lines[i].split(sep).map(s=>s.trim()),row=new Array(c.length).fill('');
     for(let j=0;j<Math.min(parts.length,c.length);j++)row[j]=parts[j];
     if(!row[0])row[0]=genId();
-    rows.push(row);
+    (K.db[K.cur]=K.db[K.cur]||[]).push(row);save(row,K.cur,2);
   }
-  const pi=K.cur==='users'?cI('users','pass'):-1;
-  if(pi>-1)await Promise.all(rows.filter(x=>x[pi]&&!isHashPass(x[pi])).map(x=>mkPass(x[pi]).then(h=>{x[pi]=h;}))); // pass selalu hash
-  rows.forEach(row=>{(K.db[K.cur]=K.db[K.cur]||[]).push(row);save(row,K.cur,2);});
   persist();syn(true);render();
 }
 
@@ -1359,7 +1285,7 @@ document.addEventListener('change',e=>{
     readFile(file,'readAsDataURL',data=>{if(tInp){tInp.value=data;updateFormThumb(tInp);}});
     t.value='';
   }else if(t===dom.fImp){
-    readFile(file,'readAsText',txt=>importText(txt).catch(err=>msg(err?.message||String(err))));
+    readFile(file,'readAsText',importText);
     t.value='';
   }
 });
@@ -1368,10 +1294,9 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&e.target.tagName!=='TEXTAREA'&&dom.fb.contains(e.target)){
     e.preventDefault();
     if(K.writing)return;
-    const fire=p=>Promise.resolve(p).catch(err=>msg(err?.message||String(err)));
-    if(!K.u)fire(actions.login());
-    else if(['bulksheet','toko','schema'].includes(K.v))fire(actions[`save-${K.v}`]());
-    else fire(actions['save-row']());
+    if(!K.u)actions.login();
+    else if(['bulksheet','toko','schema'].includes(K.v))actions[`save-${K.v}`]();
+    else actions['save-row']();
   }else if(e.key==='Escape'){
     if(!dom.scanBox.hidden)stopScan();else actions.back();
   }
