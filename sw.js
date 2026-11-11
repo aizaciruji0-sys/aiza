@@ -1,5 +1,5 @@
 /* APEX service worker: shell offline (cache-first + perbarui di latar). API/POST tidak pernah di-cache. */
-const C='apex-v2',F=['./','index.html','style.css','config.js','app.js','icon.svg','manifest.json'];
+const C='apex-v1',F=['./','index.html','style.css','config.js','app.js','icon.svg','manifest.json'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(C).then(c=>c.addAll(F)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))).then(()=>self.clients.claim())));
 self.addEventListener('fetch',e=>{
