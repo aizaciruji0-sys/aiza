@@ -99,7 +99,7 @@ async function syn(force=false){
     if(force)L.vs='[]';
     const ver=JSON.parse(L.vs||'[]');
 
-    // 1. MANIFEST: pastikan tabel ada di server + ambil versi
+    // 1. MANIFEST: pastikan tabel ada di server + ambil versi & kolom
     const r0=await req({a:'manifest',tn:tables,cols:K.cols});
     let m=r0?.data||r0;
     if(!m?.v)throw new Error('manifest');
@@ -122,7 +122,6 @@ async function syn(force=false){
     tables.forEach((_,i)=>{if(force||(m.v[i]&&m.v[i]!==ver[i]))toPull.push({t:i});});
     if(toPull.length){
       const b=await req({a:'pull_batch',reqs:toPull,tn:tables,cols:K.cols});
-      // Ada perubahan lokal baru selama sync -> buang hasil pull (akan menimpanya), ulangi sync
       if(saves!==mark||(await idbGetAll('mut')).length)again=Math.max(again,1);
       else{
         (b?.data?.results||b?.results||[]).forEach(x=>{
@@ -196,7 +195,7 @@ const fvis=(s=K.cur)=>((K.fvis?.[s]?.length)?K.fvis[s]:cols(s)).filter(c=>cols(s
 const TRXM={penjualan:{ch:'produk_jual'},pembelian:{ch:'produk_beli'}};
 const isTrx=(s=K.cur)=>Boolean(TRXM[s]);
 const childOf=s=>TRXM[s]?.ch||null;
-const parentOf=s=>s==='produk_jual'?'penjualan':(s==='produk_beli'?'pembelian':null);
+const parentOf=s=>s==='produk_jual'?'penjualan':(s==='produk_beli'?'pembelian':(s==='cicil'?'penjualan':null));
 const fkCol=s=>s==='produk_jual'?'idpenjualan':(s==='produk_beli'?'idpembelian':(s==='cicil'?'idjual':null));
 const STOCK_SHEETS=['produk_jual','produk_beli','ecer'];
 const NO_ADD=['penjualan','pembelian','produk_jual','produk_beli','cicil','ecer'];
@@ -211,17 +210,15 @@ const PRESETS={
 
 const genId=()=>{const d=new Date();return String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0')+Math.random().toString(36).slice(2,5).padEnd(3,'0');};
 const fmtNum=n=>N(n).toLocaleString('id-ID');
-const today=()=>new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10); // tanggal lokal, bukan UTC
+const today=()=>new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);
 const msg=t=>{dom.msg.innerHTML='';dom.msg.hidden=!t;if(t)dom.msg.textContent=t;};
 
-/* Tema light / dark (default: ikut sistem sampai tombol ditekan) */
 const getTheme=()=>L.theme||(W.matchMedia?.('(prefers-color-scheme: dark)').matches?'dark':'light');
 const applyTheme=t=>{
   document.documentElement.dataset.theme=t;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content',t==='dark'?'#000':'#fff');
 };
 
-/* Selector form */
 const fld=c=>dom.fb.querySelector(`[data-col="${CSS.escape(c)}"]`);
 const flds=()=>[...dom.fb.querySelectorAll('[data-col]')];
 const fldBy=re=>flds().find(i=>re.test(i.dataset.col));
@@ -236,7 +233,6 @@ const setView=(v,idx=null)=>{
   }
   K.v=v;K.idx=idx;K.conf=null;
 };
-// Tabel users diakses lewat NAMA kolom (urutan bebas); kolom password boleh 'password' atau 'pass'
 const pwCol=()=>cols('users').includes('pass')&&!cols('users').includes('password')?'pass':'password';
 const userRow=(u,role,pw)=>cols('users').map(c=>({user:u,role,[pwCol()]:pw}[c]??''));
 const getRole=()=>{
@@ -276,14 +272,14 @@ const addFooter=(a,txt,sheet=K.cur,extra='')=>{
 };
 
 /* ---------------- Stok ---------------- */
-const Z=v=>parseFloat(String(v??'').replace(/[^\d.-]/g,''))||0; // angka bertanda (stok boleh negatif)
+const Z=v=>parseFloat(String(v??'').replace(/[^\d.-]/g,''))||0;
 const syncStockDelta=(sh,o,n)=>{
   if(!STOCK_SHEETS.includes(sh))return;
   const m=sh==='produk_beli'?1:-1,si=cI('produk','stok');
   [{r:o,s:-m},{r:n,s:m}].forEach(({r,s})=>{
     if(!r)return;
     const id=cV(r,sh,'idproduk'),row=id&&K.db.produk?.find(k=>S2(k[0])===S2(id));
-    if(row&&si>-1){row[si]=String(Z(row[si])+N(cV(r,sh,'qty'))*s);save(row,'produk',1);} // stok ikut antrean mutasi
+    if(row&&si>-1){row[si]=String(Z(row[si])+N(cV(r,sh,'qty'))*s);save(row,'produk',1);}
   });
 };
 
@@ -397,7 +393,6 @@ const hasDraftItems=t=>{
   return Boolean(ch&&op&&K.db[ch]?.some(r=>S2(cV(r,ch,fkCol(ch)))===S2(op.id)));
 };
 
-/* Hapus baris yang cocok: sinkron stok + antre mutasi hapus */
 const dropRows=(sh,pred)=>{
   const keep=[];
   (K.db[sh]||[]).forEach(r=>{if(pred(r)){syncStockDelta(sh,r,null);save(r,sh,0);}else keep.push(r);});
@@ -515,7 +510,7 @@ const renderDash=()=>{
     if(passFlt(cV(r,'kas','user'),cV(r,'kas','date'),`${cV(r,'kas','kategori')} ${cV(r,'kas','uraian')}`)){mFil+=m;kFil+=k;}
   });
 
-  // Cicilan (semua & terfilter)
+  // Cicilan
   const cMap={},cFilMap={};
   (K.db.cicil||[]).forEach(c=>{
     if(!isUserVisible(c,'cicil'))return;
@@ -596,14 +591,12 @@ const renderDash=()=>{
 };
 
 const renderForm=()=>{
-  // Login
   if(!K.u){
     dom.fb.innerHTML='<input placeholder="user" autocomplete="off" data-f="user"><input type="password" placeholder="password" data-f="pass">';
     addFooter('login','login');addFooter('reg','register');addFooter('bypass','bypass admin');
     return;
   }
 
-  // Detail CMS
   if(K.cur==='cms'&&K.v==='cms_detail'){
     const r=K.db.cms?.[K.idx]||[],g=k=>cV(r,'cms',k),foto=isSafeUrl(g('foto'))?g('foto'):'',file=g('file');
     dom.fb.innerHTML=`<b>${esc(g('judul')||'-')}</b>
@@ -617,7 +610,6 @@ const renderForm=()=>{
     return;
   }
 
-  // Form konfigurasi
   if(K.v==='bulksheet'){
     dom.fb.innerHTML=`<textarea rows="10" placeholder="sheet:kolom,kolom">${esc(K.shs.map(s=>`${s}:${(K.cols[s]||[]).join(',')}`).join('\n'))}</textarea>`;
     addFooter('back','<');addFooter('save-bulksheet','save');renderNavFooters();
@@ -636,7 +628,6 @@ const renderForm=()=>{
     return;
   }
 
-  // Form baris
   const c=cols(),bypassAdd=K.idx===-1&&['produk','kas'].includes(K.cur),
         formCols=bypassAdd?fvis():fvis().filter(col=>hasAccess(col,K.cur)),
         row=(K.idx!==null&&K.idx>=0)?(K.db[K.cur][K.idx]||[]):[],
@@ -662,7 +653,6 @@ const renderForm=()=>{
   });
   K.savedFormState=null;
 
-  // Lokasi otomatis bila role mewajibkan
   if(K.idx===-1&&getRoleRules().includes('wajiblokasi')){
     const loc=fldBy(GEO_RE);
     if(loc&&!loc.value&&navigator.geolocation)
@@ -909,7 +899,7 @@ const actions={
       if(!K.vis[n]?.length)K.vis[n]=K.cols[n].slice(0,2);
     });
     if(!updated.length)return;
-    K.shs.forEach(s=>{if(!updated.includes(s)){delete K.db[s];delete K.cols[s];delete K.vis[s];delete K.fvis[s];}});
+    K.shs.forEach(s=>{if(!updated.includes(s)){delete K.db[s];delete K.cols[s];delete K.vis[s];delete K.fvis?.[s];}});
     K.shs=updated;if(!K.shs.includes(K.cur))K.cur=K.shs[0];
     persist();syn(true);setView('list',null);render();
   },
@@ -921,6 +911,15 @@ const actions={
       const c=cols(),oldRow=(K.idx>=0&&K.db[K.cur][K.idx])?K.db[K.cur][K.idx].slice():null,
             row=oldRow?oldRow.slice(0,c.length):new Array(c.length).fill('');
       while(row.length<c.length)row.push('');
+      
+      // Default fallback jika kolom tidak tampil di form
+      if(K.idx===-1){
+        c.forEach((col,i)=>{
+          if(/date|tanggal/i.test(col)&&!row[i])row[i]=today();
+          else if(col==='user'&&!row[i])row[i]=K.u||'admin';
+          else if(K.cur==='cms'&&col==='status'&&!row[i])row[i]='publish';
+        });
+      }
       flds().forEach(inp=>{const ci=c.indexOf(inp.dataset.col);if(ci!==-1)row[ci]=inp.value.trim();});
 
       if(row[0]&&(K.db[K.cur]||[]).some((r,i)=>i!==K.idx&&S2(r[0])===S2(row[0])))return msg('id sudah ada');
@@ -972,7 +971,7 @@ const actions={
       // Simpan
       if(K.idx===-1){(K.db[K.cur]=K.db[K.cur]||[]).push(row);syncStockDelta(K.cur,null,row);save(row,K.cur,2);}
       else if(K.idx>=0){
-        if(oldRow&&oldRow[0]!==row[0])save(oldRow,K.cur,0); // ID diubah: hapus baris lama agar tidak yatim di server
+        if(oldRow&&oldRow[0]!==row[0])save(oldRow,K.cur,0);
         K.db[K.cur][K.idx]=row;syncStockDelta(K.cur,oldRow,row);save(row,K.cur,1);
       }
       persist();
@@ -1203,7 +1202,7 @@ function applyPreset(name){
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-a]');
   if(b){
-    if(b.tagName==='SELECT')return; // select ditangani event change
+    if(b.tagName==='SELECT')return;
     const a=b.dataset.a;
     if(a.startsWith('ref-')){
       const cName=b.dataset.refCol||'',val=cName?(fld(cName)?.value||''):'';
@@ -1218,7 +1217,6 @@ document.addEventListener('click',e=>{
   const r=e.target.closest('#list>[data-idx]');
   if(r&&K.v==='list'&&K.idx===null){
     const idx=parseInt(r.dataset.idx,10);
-    // Mode pilih referensi: kembalikan id ke form sebelumnya
     if(K.refTargetInp&&K.hist.length){
       const prev=K.hist.pop(),selId=K.db[K.cur]?.[idx]?.[0]||'';
       K.cur=prev.cur;K.v=prev.v;K.idx=prev.idx;K.parent=prev.parent;K.readyOnly=Boolean(prev.readyOnly);
@@ -1258,7 +1256,6 @@ document.addEventListener('input',e=>{
       if(val===''&&btn)btn.remove();
       else if(val!==''&&!btn&&K.shs.includes(trg)&&(K.db[trg]||[]).length>0)addFooter(`ref-${trg}`,`ref ${trg}`,K.cur,`data-ref-col="${esc(col)}"`);
     }
-    // Auto-isi dari produk
     if(['idproduk','namaproduk'].includes(col)&&K.cur!=='produk'){
       const q=S2(val),f=q&&K.db.produk?.find(p=>S2(cV(p,'produk','idproduk')||p[0])===q||S2(cV(p,'produk','namaproduk'))===q);
       if(f)flds().forEach(inp=>{const fi=cI('produk',inp.dataset.col);if(fi!==-1)inp.value=f[fi]||'';});

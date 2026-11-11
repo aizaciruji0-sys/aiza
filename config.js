@@ -1,8 +1,8 @@
 /* APEX — konfigurasi tunggal (SSOT). Isi d1Url / gasUrl; kosong = mode offline lokal. */
 const HARD={
-  d1Url:'https://aiza3.aizaciruji0.workers.dev',   // URL Cloudflare Worker, mis. https://apex.namaanda.workers.dev
-  gasUrl:'https://script.google.com/macros/s/AKfycbzaLGQzwe3hoGekhRpMXgg3KOFA2YCdW5jvu5AY4LEoJGWgoXx-_jtz_GgMybDWxKKq/exec',  // URL Web App Google Apps Script (/exec), cadangan bila D1 tidak tersedia
-  store:{name:'TOKO',sub:'',phone:'',bank:'',footer:'Terima kasih'},
+  d1Url:'https://aiza3.aizaciruji0.workers.dev',
+  gasUrl:'https://script.google.com/macros/s/AKfycbzaLGQzwe3hoGekhRpMXgg3KOFA2YCdW5jvu5AY4LEoJGWgoXx-_jtz_GgMybDWxKKq/exec',
+  store:{name:'TB AIZA CIRUJI',sub:'Jl. Raya Saketi-Bayah',phone:'08787 117 6447',bank:'BRI 0166 0113 7004 507',footer:'Terima kasih'},
   shs:['penjualan','produk_jual','produk','pembelian','produk_beli','kas','kontak','cicil','ecer','users','roles','cms','absen'], // 'toko' ditambahkan otomatis oleh app.js
   cols:{
     penjualan:['idpenjualan','user','date','bayar','catatan','diskon','idkontak','lokasi','foto','status'],
