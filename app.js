@@ -1,6 +1,6 @@
 'use strict';
 /* ============================================================
-   APEX ULTRA KISS ABSOLUTE — MONOFLOW, ZERO-BLOAT, ANTI-BUG
+   APEX ULTRA KISS ABSOLUTE — DINAMIS, MONOFLOW, ANTI-BUG
    ============================================================ */
 const W = window, L = localStorage, $ = id => document.getElementById(id);
 let db = null, syncing = false, syncDebounce = null, scanStream = null, scanTimer = null;
@@ -12,7 +12,7 @@ bc.onmessage = e => {
   else if (e.data === 'kick' && !syncing) syn();
 };
 
-/* ---------------- IndexedDB: matrix 'kv' & antrean mutasi 'mut' ---------------- */
+/* ---------------- IndexedDB ---------------- */
 function initDB(cb) {
   try {
     const rq = indexedDB.open('apex_db', 1);
@@ -55,7 +55,7 @@ function idbDelKeys(keys, st = 'mut') {
   } catch {}
 }
 
-/* ---------------- Antrean mutasi FIFO ---------------- */
+/* ---------------- Antrean Mutasi FIFO ---------------- */
 let seq = 0, saves = 0;
 function save(row, targetTable = K.cur, actionType = 2) {
   saves++;
@@ -71,7 +71,7 @@ function save(row, targetTable = K.cur, actionType = 2) {
   syncDebounce = setTimeout(() => syn(false), 50);
 }
 
-/* ---------------- Transport Sinkronisasi ---------------- */
+/* ---------------- Transport ---------------- */
 const isOk = r => Boolean(r?.ok || r?.s === 'ok' || r?.status === 'ok');
 const SYNC_ACTIONS = ['pull_batch', 'manifest', 'push'];
 const sig = () => AbortSignal.timeout?.(30000);
@@ -112,7 +112,7 @@ async function req(p = {}) {
   });
 }
 
-/* ---------------- Pipeline Sinkronisasi ---------------- */
+/* ---------------- Pipeline Sinkronisasi Dinamis ---------------- */
 let again = 0;
 async function syn(force = false) {
   if (!navigator.onLine || !db) return false;
@@ -173,7 +173,7 @@ async function syn(force = false) {
   return ok;
 }
 
-/* ---------------- State Manajer ---------------- */
+/* ---------------- State Dinamis ---------------- */
 const dl = (content, fileName, mime = 'text/plain;charset=utf-8') => {
   const u = URL.createObjectURL(new Blob([content], { type: mime })), a = document.createElement('a');
   a.href = u; a.download = fileName; document.body.appendChild(a); a.click();
@@ -189,13 +189,14 @@ const K = {
   refTargetInp: null, savedFormState: null, pwaEvent: null, writing: false
 };
 
-if (!K.shs.includes('toko')) K.shs.push('toko');
-if (!K.cols.toko) K.cols.toko = ['id', 'name', 'sub', 'phone', 'bank', 'footer'];
-if (!K.vis.toko) K.vis.toko = ['id', 'name', 'phone'];
-if (!K.db.toko) K.db.toko = [];
+K.shs.forEach(s => {
+  if (!K.cols[s]) K.cols[s] = ['id', 'nama', 'ket'];
+  if (!K.vis[s]) K.vis[s] = K.cols[s].slice(0, 3);
+  if (!K.db[s]) K.db[s] = [];
+});
 
 const getStore = () => {
-  const r = K.db.toko?.[0] || [], c = K.cols.toko;
+  const r = K.db.toko?.[0] || [], c = K.cols.toko || [];
   const g = k => { const i = c.indexOf(k); return i > -1 && r[i] !== undefined ? r[i] : (HARD.store?.[k] || ''); };
   return { name: g('name'), sub: g('sub'), phone: g('phone'), bank: g('bank'), footer: g('footer') };
 };
@@ -298,7 +299,7 @@ const addFooter = (a, txt, sheet = K.cur, extra = '') => {
   if (hasAccess(a, sheet)) dom.ft.insertAdjacentHTML('beforeend', `<button data-a="${esc(a)}" ${extra}>${esc(txt)}</button> `);
 };
 
-/* ---------------- Sinkronisasi Stok ---------------- */
+/* ---------------- Stok ---------------- */
 const Z = v => parseFloat(String(v ?? '').replace(/[^\d.-]/g, '')) || 0;
 const syncStockDelta = (sh, o, n) => {
   if (!STOCK_SHEETS.includes(sh)) return;
@@ -310,7 +311,7 @@ const syncStockDelta = (sh, o, n) => {
   });
 };
 
-/* ---------------- Pemindai Kamera Barcode ---------------- */
+/* ---------------- Barcode Scanner ---------------- */
 const stopScan = () => {
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
@@ -331,7 +332,7 @@ const startScan = () => {
   }).catch(() => msg('kamera tidak aktif'));
 };
 
-/* ---------------- Kalkulasi Transaksi ---------------- */
+/* ---------------- Transaksi ---------------- */
 const calcItems = (t, id) => {
   const ch = childOf(t);
   if (!ch) return { raw: 0, disc: 0, cogs: 0, pot: 0, items: [] };
@@ -432,7 +433,7 @@ const dropTrxDeps = (t, id) => {
   if (t === 'penjualan') dropRows('cicil', c => S2(cV(c, 'cicil', 'idjual')) === S2(id));
 };
 
-/* ---------------- Pemetaan Prefill Produk ---------------- */
+/* ---------------- Prefill & Referensi ---------------- */
 const prefillProd = p => ({ idproduk: p[0], namaproduk: p[3], hargabeli: p[4], hargajual: p[5], qty: '1', diskon: '', catatan: '' });
 const openProdForm = p => {
   const isB = K.parent?.type === 'pembelian', pType = isB ? 'pembelian' : 'penjualan';
@@ -480,7 +481,7 @@ const queryRows = () => {
   return res;
 };
 
-/* ---------------- Render Bagian View ---------------- */
+/* ---------------- Render View ---------------- */
 const renderChrome = () => {
   const allowed = K.shs.filter(s => hasAccess(s));
   if (dom.sh.dataset.shs !== allowed.join(',')) {
@@ -808,7 +809,7 @@ const render = () => {
   else renderList(m === 'edit');
 };
 
-/* ---------------- Definisi Aksi UI ---------------- */
+/* ---------------- Actions ---------------- */
 const loginCreds = () => { const g = k => dom.fb.querySelector(`[data-f="${k}"]`)?.value || ''; return [S2(g('user')), g('pass').trim()]; };
 const enter = () => { persist(); syn(true); setView('dash', null); msg(); render(); };
 
@@ -917,8 +918,8 @@ const actions = {
       if (!n || updated.includes(n)) return;
       updated.push(n); K.db[n] = K.db[n] || [];
       const list = p.slice(1).join(':').split(',').map(S2).filter(Boolean);
-      K.cols[n] = list.length ? list : (K.cols[n] || []);
-      if (!K.vis[n]?.length) K.vis[n] = K.cols[n].slice(0, 2);
+      K.cols[n] = list.length ? list : (K.cols[n] || ['id', 'nama']);
+      if (!K.vis[n]?.length) K.vis[n] = K.cols[n].slice(0, 3);
     });
     if (!updated.length) return;
     K.shs.forEach(s => { if (!updated.includes(s)) { delete K.db[s]; delete K.cols[s]; delete K.vis[s]; delete K.fvis[s]; } });
@@ -1137,7 +1138,7 @@ const actions = {
     if (nc.length) {
       const v = list('vis').filter(x => nc.includes(x)), f = list('form').filter(x => nc.includes(x));
       K.cols[K.cur] = nc;
-      K.vis[K.cur] = v.length ? v : nc.slice(0, 2);
+      K.vis[K.cur] = v.length ? v : nc.slice(0, 3);
       K.fvis[K.cur] = f.length ? f : nc.slice();
       (K.db[K.cur] || []).forEach(r => { if (r.length > nc.length) r.length = nc.length; while (r.length < nc.length) r.push(''); });
       persist(); syn(true);
@@ -1324,7 +1325,7 @@ if ('serviceWorker' in navigator && (W.location.protocol.startsWith('http') || W
   W.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
 W.addEventListener('online', () => syn(true));
 
-/* ---------------- Inisialisasi Boot ---------------- */
+/* ---------------- Boot ---------------- */
 (() => {
   if (L.theme) applyTheme(L.theme);
   try {
